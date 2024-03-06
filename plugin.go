@@ -3,10 +3,9 @@ package plasmactlmeta
 
 import (
 	"fmt"
+	"github.com/launchrctl/launchr/pkg/cli"
 	"os"
 	"os/exec"
-
-	"github.com/launchrctl/launchr/pkg/cli"
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
@@ -59,33 +58,30 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 }
 
 func meta(environment, resources string, k keyring.Keyring) error {
-
+	fmt.Println()
+	cli.Println("")
 	cmd := exec.Command("plasmactl", "bump")
-	output, _ := cmd.CombinedOutput()
-	cli.Println(string(output)) // No err case because program should continue regardless
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin // Connect standard input to the parent process
+	if err := cmd.Run(); err != nil {
+		fmt.Println(cmd.Stderr)
+	}
 
 	cmd = exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity")
-	output, err := cmd.CombinedOutput()
-	cli.Println(string(output)) // Placed before err case to also output exec.Command stderr
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitError.ExitCode()) // Return exit code from exec.Command
-		} else {
-			fmt.Println("Error:", err)
-			os.Exit(1) // Return a non-zero exit code for other errors
-		}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin // Connect standard input to the parent process
+	if err := cmd.Run(); err != nil {
+		return err
 	}
 
 	cmd = exec.Command("plasmactl", "platform:sync", "dev")
-	output, err = cmd.CombinedOutput()
-	cli.Println(string(output))
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitError.ExitCode())
-		} else {
-			fmt.Println("Error:", err)
-			os.Exit(1)
-		}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin // Connect standard input to the parent process
+	if err := cmd.Run(); err != nil {
+		return err
 	}
 
 	return nil
