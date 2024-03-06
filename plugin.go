@@ -2,10 +2,13 @@
 package plasmactlmeta
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/launchrctl/launchr/pkg/cli"
 	"os"
 	"os/exec"
+
+	"io"
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
@@ -58,30 +61,42 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 }
 
 func meta(environment, resources string, k keyring.Keyring) error {
-	fmt.Println()
 	cli.Println("")
 	cmd := exec.Command("plasmactl", "bump")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin // Connect standard input to the parent process
-	if err := cmd.Run(); err != nil {
-		fmt.Println(cmd.Stderr)
-	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	cmd.Stdin = os.Stdin
+	_ = cmd.Run()
 
+	fmt.Println()
 	cmd = exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin // Connect standard input to the parent process
-	if err := cmd.Run(); err != nil {
-		return err
+	cmd.Stdin = os.Stdin
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		} else {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
 	}
 
+	fmt.Println()
 	cmd = exec.Command("plasmactl", "platform:sync", "dev")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin // Connect standard input to the parent process
-	if err := cmd.Run(); err != nil {
-		return err
+	cmd.Stdin = os.Stdin
+	err = cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		} else {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
 	}
 
 	return nil
