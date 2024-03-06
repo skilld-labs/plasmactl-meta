@@ -10,7 +10,6 @@ import (
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
-	"github.com/launchrctl/launchr/pkg/log"
 	"github.com/spf13/cobra"
 )
 
@@ -61,28 +60,40 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 
 func meta(environment, resources string, k keyring.Keyring) error {
 
-	cli.Println("XXXXX")
-
 	cmd := exec.Command("plasmactl", "bump")
-	if err := cmd.Run(); err != nil {
-		fmt.Println("Error executing bump:", err)
-		os.Exit(1)
-	}
+	output, _ := cmd.CombinedOutput()
+	cli.Println(string(output)) // No err case because program should continue regardless
 
 	cmd = exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity")
-	if err := cmd.Run(); err != nil {
-		fmt.Println("Error executing compose:", err)
-		os.Exit(1)
+	output, err := cmd.CombinedOutput()
+	cli.Println(string(output)) // Placed before err case to also output exec.Command stderr
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitError.ExitCode()) // Return exit code from exec.Command
+		} else {
+			fmt.Println("Error:", err)
+			os.Exit(1) // Return a non-zero exit code for other errors
+		}
 	}
 
-	log.Info("XXXX")
-
-	cli.Println("XXXXX")
-
-	//if err != nil {
-	//return errors.New("error opening artifact file")
-	//}
-	//log.Debug("%s", err)
+	cmd = exec.Command("plasmactl", "platform:sync", "dev")
+	output, err = cmd.CombinedOutput()
+	cli.Println(string(output))
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitError.ExitCode())
+		} else {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+	}
 
 	return nil
 }
+
+//return errors.New("error opening artifact file")
+//log.Info("LOG INFO")
+//if err != nil {
+//log.Debug("%s", err)
+//return errors.New("something wrong doing this")
+//}
