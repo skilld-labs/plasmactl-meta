@@ -4,13 +4,16 @@ package plasmactlmeta
 import (
 	"bytes"
 	"fmt"
-	"github.com/launchrctl/launchr/pkg/cli"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
+
+	"github.com/launchrctl/launchr/pkg/cli"
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
+	"github.com/launchrctl/launchr/pkg/log"
 	"github.com/spf13/cobra"
 )
 
@@ -38,28 +41,31 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
-	var environment string
-	var resources string
-
-	var pblCmd = &cobra.Command{
-		Use:   "meta",
+	var metaCmd = &cobra.Command{
+		Use:   "meta [flags] environment tags",
 		Short: "Executes bump + compose + sync + package + publish + deploy",
+		Args:  cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Don't show usage help on a runtime error.
 			cmd.SilenceUsage = true
+			keyringPassphrase, _ := cmd.Flags().GetString("keyring-passphrase")
 
-			return meta(environment, resources, p.k)
+			return meta(args[0], args[1], keyringPassphrase, p.k)
 		},
 	}
+	metaCmd.SetArgs([]string{"environment", "tags"})
 
-	pblCmd.Flags().StringVarP(&environment, "environment", "", "", "Target environment")
-	pblCmd.Flags().StringVarP(&resources, "resources", "", "", "Resources to deploy")
-
-	rootCmd.AddCommand(pblCmd)
+	rootCmd.AddCommand(metaCmd)
 	return nil
 }
 
-func meta(environment, resources string, k keyring.Keyring) error {
+func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error {
+	log.Info(fmt.Sprintf("ENVIRONMENT: %s", environment))
+	log.Info(fmt.Sprintf("TAGS: %s", tags))
+	log.Info(fmt.Sprintf("KEYRING PW: %s\n", keyringPassphrase))
+
+	time.Sleep(1000 * time.Minute) // TODO: Remove after tests
+
 	bumpCmd := exec.Command("plasmactl", "bump")
 	bumpCmd.Stdout = os.Stdout
 	bumpCmd.Stderr = os.Stderr
