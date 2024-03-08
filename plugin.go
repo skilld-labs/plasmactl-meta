@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"time"
 
 	"github.com/launchrctl/launchr/pkg/cli"
 
@@ -94,10 +93,9 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	log.Info(fmt.Sprintf("environment: %s", environment))
 	log.Info(fmt.Sprintf("tags: %s", tags))
 	log.Info(fmt.Sprintf("username: %s", username))
-	log.Info(fmt.Sprintf("password: %s", password))
+	log.Info(fmt.Sprintf("password: %s", password))                     // TODO: Remove after tests
 	log.Info(fmt.Sprintf("keyringPassphrase: %s\n", keyringPassphrase)) // TODO: Remove after tests
 
-	time.Sleep(1000 * time.Minute) // TODO: Remove after tests
 	// Commands executed sequentially
 
 	bumpCmd := exec.Command("plasmactl", "bump")
@@ -107,7 +105,7 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	_ = bumpCmd.Run()
 
 	fmt.Println()
-	composeCmd := exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity", "--keyring-passphrase", "X")
+	composeCmd := exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity", "--keyring-passphrase", "\"", keyringPassphrase, "\"")
 	composeCmd.Stdout = os.Stdout
 	composeCmd.Stderr = os.Stderr
 	composeCmd.Stdin = os.Stdin
@@ -123,7 +121,7 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 
 	fmt.Println()
 	syncCmd := exec.Command("plasmactl", "platform:sync", "dev")
-	//syncCmd = exec.Command("plasmactl", "bump", "--sync", "dev", "--keyring-passphrase", "X") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
+	//syncCmd = exec.Command("plasmactl", "bump", "--sync", "dev", "--keyring-passphrase", "\"", keyringPassphrase, "\"") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
@@ -163,7 +161,7 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 		}
 
 		//publishCmd := exec.Command("plasmactl", "publish")
-		publishCmd := exec.Command("plasmactl", "publish", "--keyring-passphrase", "X")
+		publishCmd := exec.Command("plasmactl", "publish", "--keyring-passphrase", "\"", keyringPassphrase, "\"")
 		publishCmd.Stdout = &publishStdOut
 		publishCmd.Stderr = &publishStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
@@ -178,9 +176,8 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	go func(wg *sync.WaitGroup) {
 		cli.Println("--Starting waitgroup 2")
 		defer wg.Done()
-		//deployCmd := exec.Command("ls", "-lah")
 		deployCmd := exec.Command("plasmactl", "platform:deploy", "dev", "interaction.applications.repositories")
-		//deployCmd := exec.Command("plasmactl", "deploy", "dev", "interaction.applications.repositories" "--keyring-passphrase", "X") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
+		//deployCmd := exec.Command("plasmactl", "deploy", "dev", "interaction.applications.repositories" "--keyring-passphrase", "\"", keyringPassphrase, "\"") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
