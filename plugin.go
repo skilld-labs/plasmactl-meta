@@ -84,14 +84,12 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 		return err
 	}
 	// If publish command credentials were not found in keyring, we add them
-	defer func() {
-		if save {
-			err = k.Save()
-			if err != nil {
-				log.Err("Error during saving keyring file", err)
-			}
+	if save {
+		err = k.Save()
+		if err != nil {
+			log.Err("Error during saving keyring file", err)
 		}
-	}()
+	}
 
 	log.Info(fmt.Sprintf("environment: %s", environment))
 	log.Info(fmt.Sprintf("tags: %s", tags))
@@ -229,9 +227,14 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 func getCredentials(url, username, password string, k keyring.Keyring) (keyring.CredentialsItem, bool, error) {
 	ci, err := k.GetForURL(url)
 	save := false
+	if len(ci.URL) != 0 && len(ci.Username) != 0 && len(ci.Password) != 0 {
+		log.Debug("Keyring was unlocked successfully: credentials fetched are not empty")
+	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrEmptyPass) {
 			return ci, false, err
+		} else if errors.Is(err, keyring.ErrNotFound) {
+			log.Debug("Keyring was unlocked or created successfully: publish credentials were not found")
 		} else if !errors.Is(err, keyring.ErrNotFound) {
 			log.Debug("%s", err)
 			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
@@ -281,8 +284,6 @@ func isURLAccessible(url string, code *int) bool {
 // - check if package does create artifact in background
 // - check if with publish keyring, artifact is uploaded in background
 // - implement same options as commands used
-// - prompt for publish credentials if not in keyring
-// - check if keyring credentials are correct
 
 //return errors.New("error opening artifact file")
 //log.Info("LOG INFO")
