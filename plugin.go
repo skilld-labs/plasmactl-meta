@@ -3,7 +3,9 @@ package plasmactlmeta
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
@@ -41,6 +43,9 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
+	var username string
+	var password string
+
 	var metaCmd = &cobra.Command{
 		Use:   "meta [flags] environment tags",
 		Short: "Executes bump + compose + sync + package + publish + deploy",
@@ -53,21 +58,49 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 				log.Fatal("error while getting keyringPassphrase option value: ", err)
 			}
 
-			return meta(args[0], args[1], keyringPassphrase, p.k)
+			return meta(args[0], args[1], keyringPassphrase, username, password, p.k)
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
+	metaCmd.Flags().StringVarP(&username, "username", "", "", "Username for artifact repository")
+	metaCmd.Flags().StringVarP(&password, "password", "", "", "Password for artifact repository")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
 }
 
-func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error {
-	log.Info(fmt.Sprintf("ENVIRONMENT: %s", environment))
-	log.Info(fmt.Sprintf("TAGS: %s", tags))
-	log.Info(fmt.Sprintf("KEYRING PW: %s\n", keyringPassphrase))
+func meta(environment, tags, keyringPassphrase string, username string, password string, k keyring.Keyring) error {
+
+	// Check if provided keyring pw is correct, since it will be used for multiple commands
+	// Check if publish command credentials are available in keyring and correct as stdin will not be availale in goroutine
+	artifactsRepositoryDomain := "https://repositories.skilld.cloud"
+	var accessibilityCode int
+	if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
+		artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
+	}
+	cli.Println("Getting credentials")
+	_, save, err := getCredentials(artifactsRepositoryDomain, username, password, k)
+	if err != nil {
+		return err
+	}
+	// If publish command credentials were not found in keyring, we add them
+	defer func() {
+		if save {
+			err = k.Save()
+			if err != nil {
+				log.Err("Error during saving keyring file", err)
+			}
+		}
+	}()
+
+	log.Info(fmt.Sprintf("environment: %s", environment))
+	log.Info(fmt.Sprintf("tags: %s", tags))
+	log.Info(fmt.Sprintf("username: %s", username))
+	log.Info(fmt.Sprintf("password: %s", password))
+	log.Info(fmt.Sprintf("keyringPassphrase: %s\n", keyringPassphrase)) // TODO: Remove after tests
 
 	time.Sleep(1000 * time.Minute) // TODO: Remove after tests
+	// Commands executed sequentially
 
 	bumpCmd := exec.Command("plasmactl", "bump")
 	bumpCmd.Stdout = os.Stdout
@@ -92,7 +125,7 @@ func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error 
 
 	fmt.Println()
 	syncCmd := exec.Command("plasmactl", "platform:sync", "dev")
-	//syncCmd = exec.Command("plasmactl", "bump", "--sync", "dev", "--keyring-passphrase", "X")
+	//syncCmd = exec.Command("plasmactl", "bump", "--sync", "dev", "--keyring-passphrase", "X") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
@@ -114,6 +147,7 @@ func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error 
 	var publishStdErr bytes.Buffer
 	var publishErr error
 
+	// Commands executed in parallel
 	fmt.Println()
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
@@ -146,8 +180,9 @@ func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error 
 	go func(wg *sync.WaitGroup) {
 		cli.Println("--Starting waitgroup 2")
 		defer wg.Done()
-		//deployCmd := exec.Command("plasmactl", "platform:deploy", "dev", "interaction.applications.repositories")
-		deployCmd := exec.Command("ls", "-lah")
+		//deployCmd := exec.Command("ls", "-lah")
+		deployCmd := exec.Command("plasmactl", "platform:deploy", "dev", "interaction.applications.repositories")
+		//deployCmd := exec.Command("plasmactl", "deploy", "dev", "interaction.applications.repositories" "--keyring-passphrase", "X") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
@@ -191,10 +226,63 @@ func meta(environment, tags, keyringPassphrase string, k keyring.Keyring) error 
 	return nil
 }
 
+func getCredentials(url, username, password string, k keyring.Keyring) (keyring.CredentialsItem, bool, error) {
+	ci, err := k.GetForURL(url)
+	save := false
+	if err != nil {
+		if errors.Is(err, keyring.ErrEmptyPass) {
+			return ci, false, err
+		} else if !errors.Is(err, keyring.ErrNotFound) {
+			log.Debug("%s", err)
+			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
+		}
+		ci = keyring.CredentialsItem{}
+		ci.URL = url
+		ci.Username = username
+		ci.Password = password
+		if ci.Username == "" || ci.Password == "" {
+			if ci.URL != "" {
+				cli.Println("Please add login and password for URL - %s", ci.URL)
+			}
+			err = keyring.RequestCredentialsFromTty(&ci)
+			if err != nil {
+				return ci, false, err
+			}
+		}
+
+		err = k.AddItem(ci)
+		if err != nil {
+			return ci, false, err
+		}
+
+		save = true
+	}
+
+	return ci, save, nil
+}
+
+func isURLAccessible(url string, code *int) bool {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+
+	defer resp.Body.Close()
+	*code = resp.StatusCode
+	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+}
+
 //TODO:
 // - check if package does create artifact in background
 // - check if with publish keyring, artifact is uploaded in background
 // - implement same options as commands used
+// - prompt for publish credentials if not in keyring
+// - check if keyring credentials are correct
 
 //return errors.New("error opening artifact file")
 //log.Info("LOG INFO")
