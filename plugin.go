@@ -48,7 +48,10 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Don't show usage help on a runtime error.
 			cmd.SilenceUsage = true
-			keyringPassphrase, _ := cmd.Flags().GetString("keyring-passphrase")
+			keyringPassphrase, err := cmd.Flags().GetString("keyring-passphrase")
+			if err != nil {
+				log.Fatal("error while getting keyringPassphrase option value: ", err)
+			}
 
 			return meta(args[0], args[1], keyringPassphrase, p.k)
 		},
