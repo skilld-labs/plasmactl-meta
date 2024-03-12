@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/launchrctl/launchr/pkg/cli"
@@ -69,6 +70,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 }
 
 func meta(environment, tags, keyringPassphrase string, username string, password string, k keyring.Keyring) error {
+	// Enter keyring passphrase:
 
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
 	// Check if publish command credentials are available in keyring and correct as stdin will not be availale in goroutine
@@ -77,38 +79,48 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
 		artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
 	}
-	cli.Println("Getting credentials")
+	cli.Println("Checking keyring...")
 	_, save, err := getCredentials(artifactsRepositoryDomain, username, password, k)
 	if err != nil {
 		return err
 	}
 	// If publish command credentials were not found in keyring, we add them
 	if save {
-		err = k.Save()
+		err = k.Save() // TODO: If new keyring and passphrase is defined, use new passphrase right away in all commands > requires keyring lib update to get passphrase
 		if err != nil {
 			log.Err("Error during saving keyring file", err)
 		}
+	}
+	fmt.Println()
+
+	// Appending --keyring-passphrase to commands
+	keyringCmd := func(command string, args ...string) *exec.Cmd {
+		if keyringPassphrase != "" {
+			args = append(args, "--keyring-passphrase", keyringPassphrase)
+		}
+		return exec.Command(command, args...)
 	}
 
 	log.Info(fmt.Sprintf("environment: %s", environment))
 	log.Info(fmt.Sprintf("tags: %s", tags))
 	log.Info(fmt.Sprintf("username: %s", username))
-	log.Info(fmt.Sprintf("password: %s", password))                     // TODO: Remove after tests
-	log.Info(fmt.Sprintf("keyringPassphrase: %s\n", keyringPassphrase)) // TODO: Remove after tests
 
 	// Commands executed sequentially
 
+	fmt.Println()
 	bumpCmd := exec.Command("plasmactl", "bump")
 	bumpCmd.Stdout = os.Stdout
 	bumpCmd.Stderr = os.Stderr
 	bumpCmd.Stdin = os.Stdin
+	cli.Println(sanitizeString(bumpCmd.String(), keyringPassphrase))
 	_ = bumpCmd.Run()
 
 	fmt.Println()
-	composeCmd := exec.Command("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity", "--keyring-passphrase", "\"", keyringPassphrase, "\"")
+	composeCmd := keyringCmd("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity")
 	composeCmd.Stdout = os.Stdout
 	composeCmd.Stderr = os.Stderr
 	composeCmd.Stdin = os.Stdin
+	cli.Println(sanitizeString(composeCmd.String(), keyringPassphrase))
 	composeErr := composeCmd.Run()
 	if composeErr != nil {
 		if exitErr, ok := composeErr.(*exec.ExitError); ok {
@@ -120,11 +132,12 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	}
 
 	fmt.Println()
-	syncCmd := exec.Command("plasmactl", "platform:sync", "dev")
-	//syncCmd = exec.Command("plasmactl", "bump", "--sync", "dev", "--keyring-passphrase", "\"", keyringPassphrase, "\"") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
+	syncCmd := exec.Command("plasmactl", "platform:sync", environment)
+	//syncCmd = keyringCmd("plasmactl", "bump", "--sync", environment) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
+	cli.Println(sanitizeString(syncCmd.String(), keyringPassphrase))
 	syncErr := syncCmd.Run()
 	if syncErr != nil {
 		if exitErr, ok := syncErr.(*exec.ExitError); ok {
@@ -135,6 +148,8 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 		}
 	}
 
+	// Commands executed in parallel
+
 	var packageStdOut bytes.Buffer
 	var packageStdErr bytes.Buffer
 	var packageErr error
@@ -143,44 +158,42 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	var publishStdErr bytes.Buffer
 	var publishErr error
 
-	// Commands executed in parallel
 	fmt.Println()
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
-		cli.Println("--Starting waitgroup 1")
 		defer wg.Done()
 
 		packageCmd := exec.Command("plasmactl", "package")
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+		cli.Println(sanitizeString(packageCmd.String(), keyringPassphrase))
 		packageErr = packageCmd.Run()
 		if packageErr != nil {
 			return
 		}
 
-		//publishCmd := exec.Command("plasmactl", "publish")
-		publishCmd := exec.Command("plasmactl", "publish", "--keyring-passphrase", "\"", keyringPassphrase, "\"")
+		publishCmd := keyringCmd("plasmactl", "publish")
 		publishCmd.Stdout = &publishStdOut
 		publishCmd.Stderr = &publishStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+		//cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears in deploy command stdin
 		publishErr = publishCmd.Run()
 		if publishErr != nil {
 			return
 		}
-		cli.Println("--Exiting waitgroup 1")
 	}(wg)
 
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
-		cli.Println("--Starting waitgroup 2")
 		defer wg.Done()
-		deployCmd := exec.Command("plasmactl", "platform:deploy", "dev", "interaction.applications.repositories")
-		//deployCmd := exec.Command("plasmactl", "deploy", "dev", "interaction.applications.repositories" "--keyring-passphrase", "\"", keyringPassphrase, "\"") // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
+		deployCmd := exec.Command("plasmactl", "platform:deploy", environment, tags)
+		//deployCmd := keyringCmd("plasmactl", "deploy", environment, tags) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
+		cli.Println(sanitizeString(deployCmd.String(), keyringPassphrase))
 		deployErr := deployCmd.Run()
 		if deployErr != nil {
 			if exitErr, ok := deployErr.(*exec.ExitError); ok {
@@ -190,7 +203,6 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 				os.Exit(1)
 			}
 		}
-		cli.Println("--Ending waitgroup 2")
 	}(wg)
 	wg.Wait()
 
@@ -206,7 +218,6 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 		}
 	}
 
-	fmt.Println()
 	fmt.Println(publishStdOut.String())
 	fmt.Println(publishStdErr.String())
 	if publishErr != nil {
@@ -225,13 +236,13 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 	ci, err := k.GetForURL(url)
 	save := false
 	if len(ci.URL) != 0 && len(ci.Username) != 0 && len(ci.Password) != 0 {
-		log.Debug("Keyring was unlocked successfully: credentials fetched are not empty")
+		cli.Println("Keyring was unlocked successfully: publish credentials were found")
 	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrEmptyPass) {
 			return ci, false, err
 		} else if errors.Is(err, keyring.ErrNotFound) {
-			log.Debug("Keyring was unlocked or created successfully: publish credentials were not found")
+			cli.Println("Keyring was unlocked or created successfully: publish credentials were not found")
 		} else if !errors.Is(err, keyring.ErrNotFound) {
 			log.Debug("%s", err)
 			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
@@ -277,14 +288,11 @@ func isURLAccessible(url string, code *int) bool {
 	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 }
 
-//TODO:
-// - check if package does create artifact in background
-// - check if with publish keyring, artifact is uploaded in background
-// - implement same options as commands used
+func sanitizeString(command string, passphrase string) string {
+	if passphrase != "" {
+		return strings.ReplaceAll(command, passphrase, "[masked]")
+	} else {
+		return command
+	}
+}
 
-//return errors.New("error opening artifact file")
-//log.Info("LOG INFO")
-//if err != nil {
-//log.Debug("%s", err)
-//return errors.New("something wrong doing this")
-//}
