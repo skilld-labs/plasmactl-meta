@@ -1,6 +1,6 @@
 module github.com/skilld-labs/plasmactl-meta
 
-go 1.21.7
+go 1.21
 
 require (
 	github.com/launchrctl/keyring v0.1.1

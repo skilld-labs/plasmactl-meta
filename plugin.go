@@ -45,6 +45,8 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 	var username string
 	var password string
+	var clean bool
+	var override string
 
 	var metaCmd = &cobra.Command{
 		Use:   "meta [flags] environment tags",
@@ -57,19 +59,25 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 			if err != nil {
 				log.Fatal("error while getting keyringPassphrase option value: ", err)
 			}
+			verboseCount, err := cmd.Flags().GetCount("verbose")
+			if err != nil {
+				return err
+			}
 
-			return meta(args[0], args[1], keyringPassphrase, username, password, p.k)
+			return meta(args[0], args[1], keyringPassphrase, username, password, override, clean, verboseCount, p.k)
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
 	metaCmd.Flags().StringVarP(&username, "username", "", "", "Username for artifact repository")
 	metaCmd.Flags().StringVarP(&password, "password", "", "", "Password for artifact repository")
+	metaCmd.Flags().StringVar(&override, "override", "", "Bump --sync override option")
+	metaCmd.Flags().BoolVar(&clean, "clean", false, "Clean flag for compose command")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
 }
 
-func meta(environment, tags, keyringPassphrase string, username string, password string, k keyring.Keyring) error {
+func meta(environment, tags, keyringPassphrase, username, password, override string, clean bool, verboseCount int, k keyring.Keyring) error {
 	// Enter keyring passphrase:
 
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
@@ -93,11 +101,20 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	}
 	fmt.Println()
 
+	var commonArgs []string
+	verbosity := ""
+	if verboseCount > 0 {
+		verbosity = "-" + strings.Repeat("v", verboseCount)
+		commonArgs = append(commonArgs, verbosity)
+		log.Debug("verbosity set as %q", verbosity)
+	}
+
 	// Appending --keyring-passphrase to commands
 	keyringCmd := func(command string, args ...string) *exec.Cmd {
 		if keyringPassphrase != "" {
 			args = append(args, "--keyring-passphrase", keyringPassphrase)
 		}
+
 		return exec.Command(command, args...)
 	}
 
@@ -108,7 +125,9 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	// Commands executed sequentially
 
 	fmt.Println()
-	bumpCmd := exec.Command("plasmactl", "bump")
+	bumpArgs := []string{"bump"}
+	bumpArgs = append(bumpArgs, commonArgs...)
+	bumpCmd := exec.Command("plasmactl", bumpArgs...)
 	bumpCmd.Stdout = os.Stdout
 	bumpCmd.Stderr = os.Stderr
 	bumpCmd.Stdin = os.Stdin
@@ -116,35 +135,35 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	_ = bumpCmd.Run()
 
 	fmt.Println()
-	composeCmd := keyringCmd("plasmactl", "compose", "--skip-not-versioned", "--conflicts-verbosity")
+	composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
+	if clean {
+		composeArgs = append(composeArgs, "--clean")
+	}
+	composeArgs = append(composeArgs, commonArgs...)
+	composeCmd := keyringCmd("plasmactl", composeArgs...)
 	composeCmd.Stdout = os.Stdout
 	composeCmd.Stderr = os.Stderr
 	composeCmd.Stdin = os.Stdin
 	cli.Println(sanitizeString(composeCmd.String(), keyringPassphrase))
 	composeErr := composeCmd.Run()
 	if composeErr != nil {
-		if exitErr, ok := composeErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		} else {
-			fmt.Println("Error:", composeErr)
-			os.Exit(1)
-		}
+		handleCmdErr(composeErr)
 	}
 
 	fmt.Println()
-	syncCmd := exec.Command("plasmactl", "bump", "--sync")
+	bumpSyncArgs := []string{"bump", "--sync"}
+	if override != "" {
+		bumpSyncArgs = append(bumpSyncArgs, "--override", override)
+	}
+	bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
+	syncCmd := exec.Command("plasmactl", bumpSyncArgs...)
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
 	cli.Println(sanitizeString(syncCmd.String(), keyringPassphrase))
 	syncErr := syncCmd.Run()
 	if syncErr != nil {
-		if exitErr, ok := syncErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		} else {
-			fmt.Println("Error:", syncErr)
-			os.Exit(1)
-		}
+		handleCmdErr(syncErr)
 	}
 
 	// Commands executed in parallel
@@ -162,8 +181,9 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		defer wg.Done()
-
-		packageCmd := exec.Command("plasmactl", "package")
+		packageCmdArgs := []string{"package"}
+		packageCmdArgs = append(packageCmdArgs, commonArgs...)
+		packageCmd := exec.Command("plasmactl", packageCmdArgs...)
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
@@ -173,7 +193,9 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 			return
 		}
 
-		publishCmd := keyringCmd("plasmactl", "publish")
+		publishCmdArgs := []string{"publish"}
+		publishCmdArgs = append(publishCmdArgs, commonArgs...)
+		publishCmd := keyringCmd("plasmactl", publishCmdArgs...)
 		publishCmd.Stdout = &publishStdOut
 		publishCmd.Stderr = &publishStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
@@ -187,7 +209,14 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
 		defer wg.Done()
-		deployCmd := exec.Command("plasmactl", "platform:deploy", environment, tags)
+		deployCmdArgs := []string{"platform:deploy"}
+		deployCmdArgs = append(deployCmdArgs, environment)
+		deployCmdArgs = append(deployCmdArgs, tags)
+		if verbosity != "" {
+			deployCmdArgs = append(deployCmdArgs, "--debug")
+		}
+
+		deployCmd := exec.Command("plasmactl", deployCmdArgs...)
 		//deployCmd := keyringCmd("plasmactl", "deploy", environment, tags) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
@@ -195,12 +224,7 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 		cli.Println(sanitizeString(deployCmd.String(), keyringPassphrase))
 		deployErr := deployCmd.Run()
 		if deployErr != nil {
-			if exitErr, ok := deployErr.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			} else {
-				fmt.Println("Error:", deployErr)
-				os.Exit(1)
-			}
+			handleCmdErr(deployErr)
 		}
 	}(wg)
 	wg.Wait()
@@ -209,26 +233,26 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	fmt.Println(packageStdOut.String())
 	fmt.Println(packageStdErr.String())
 	if packageErr != nil {
-		if exitErr, ok := packageErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		} else {
-			fmt.Println("Error:", packageErr)
-			os.Exit(1)
-		}
+		handleCmdErr(packageErr)
 	}
 
 	fmt.Println(publishStdOut.String())
 	fmt.Println(publishStdErr.String())
 	if publishErr != nil {
-		if exitErr, ok := publishErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		} else {
-			fmt.Println("Error:", publishErr)
-			os.Exit(1)
-		}
+		handleCmdErr(publishErr)
 	}
 
 	return nil
+}
+
+func handleCmdErr(cmdErr error) {
+	var exitErr *exec.ExitError
+	if errors.As(cmdErr, &exitErr) {
+		os.Exit(exitErr.ExitCode())
+	}
+
+	fmt.Println("Error:", cmdErr)
+	os.Exit(1)
 }
 
 func getCredentials(url, username, password string, k keyring.Keyring) (keyring.CredentialsItem, bool, error) {
@@ -290,7 +314,7 @@ func isURLAccessible(url string, code *int) bool {
 func sanitizeString(command string, passphrase string) string {
 	if passphrase != "" {
 		return strings.ReplaceAll(command, passphrase, "[masked]")
-	} else {
-		return command
 	}
+
+	return command
 }
