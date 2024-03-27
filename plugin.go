@@ -132,8 +132,7 @@ func meta(environment, tags, keyringPassphrase string, username string, password
 	}
 
 	fmt.Println()
-	syncCmd := exec.Command("plasmactl", "platform:sync", environment)
-	//syncCmd = keyringCmd("plasmactl", "bump", "--sync", environment) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/66
+	syncCmd := exec.Command("plasmactl", "bump", "--sync")
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
@@ -295,4 +294,3 @@ func sanitizeString(command string, passphrase string) string {
 		return command
 	}
 }
-
