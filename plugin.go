@@ -41,12 +41,19 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 	return nil
 }
 
+type metaOptions struct {
+	verboseCount      int
+	keyringPassphrase string
+	username          string
+	password          string
+	override          string
+	clean             bool
+	last              bool
+}
+
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
-	var username string
-	var password string
-	var clean bool
-	var override string
+	options := metaOptions{}
 
 	var metaCmd = &cobra.Command{
 		Use:   "meta [flags] environment tags",
@@ -59,25 +66,28 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 			if err != nil {
 				log.Fatal("error while getting keyringPassphrase option value: ", err)
 			}
+			options.keyringPassphrase = keyringPassphrase
 			verboseCount, err := cmd.Flags().GetCount("verbose")
 			if err != nil {
 				return err
 			}
+			options.verboseCount = verboseCount
 
-			return meta(args[0], args[1], keyringPassphrase, username, password, override, clean, verboseCount, p.k)
+			return meta(args[0], args[1], options, p.k)
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
-	metaCmd.Flags().StringVarP(&username, "username", "", "", "Username for artifact repository")
-	metaCmd.Flags().StringVarP(&password, "password", "", "", "Password for artifact repository")
-	metaCmd.Flags().StringVar(&override, "override", "", "Bump --sync override option")
-	metaCmd.Flags().BoolVar(&clean, "clean", false, "Clean flag for compose command")
+	metaCmd.Flags().StringVarP(&options.username, "username", "", "", "Username for artifact repository")
+	metaCmd.Flags().StringVarP(&options.password, "password", "", "", "Password for artifact repository")
+	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
+	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for compose command")
+	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for bump command")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
 }
 
-func meta(environment, tags, keyringPassphrase, username, password, override string, clean bool, verboseCount int, k keyring.Keyring) error {
+func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
 	// Enter keyring passphrase:
 
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
@@ -88,7 +98,7 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 		artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
 	}
 	cli.Println("Checking keyring...")
-	_, save, err := getCredentials(artifactsRepositoryDomain, username, password, k)
+	_, save, err := getCredentials(artifactsRepositoryDomain, options.username, options.password, k)
 	if err != nil {
 		return err
 	}
@@ -103,16 +113,16 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 
 	var commonArgs []string
 	verbosity := ""
-	if verboseCount > 0 {
-		verbosity = "-" + strings.Repeat("v", verboseCount)
+	if options.verboseCount > 0 {
+		verbosity = "-" + strings.Repeat("v", options.verboseCount)
 		commonArgs = append(commonArgs, verbosity)
 		log.Debug("verbosity set as %q", verbosity)
 	}
 
 	// Appending --keyring-passphrase to commands
 	keyringCmd := func(command string, args ...string) *exec.Cmd {
-		if keyringPassphrase != "" {
-			args = append(args, "--keyring-passphrase", keyringPassphrase)
+		if options.keyringPassphrase != "" {
+			args = append(args, "--keyring-passphrase", options.keyringPassphrase)
 		}
 
 		return exec.Command(command, args...)
@@ -120,23 +130,26 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 
 	log.Info(fmt.Sprintf("environment: %s", environment))
 	log.Info(fmt.Sprintf("tags: %s", tags))
-	log.Info(fmt.Sprintf("username: %s", username))
+	log.Info(fmt.Sprintf("username: %s", options.username))
 
 	// Commands executed sequentially
 
 	fmt.Println()
 	bumpArgs := []string{"bump"}
+	if options.last {
+		bumpArgs = append(bumpArgs, "--last")
+	}
 	bumpArgs = append(bumpArgs, commonArgs...)
 	bumpCmd := exec.Command("plasmactl", bumpArgs...)
 	bumpCmd.Stdout = os.Stdout
 	bumpCmd.Stderr = os.Stderr
 	bumpCmd.Stdin = os.Stdin
-	cli.Println(sanitizeString(bumpCmd.String(), keyringPassphrase))
+	cli.Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
 	_ = bumpCmd.Run()
 
 	fmt.Println()
 	composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
-	if clean {
+	if options.clean {
 		composeArgs = append(composeArgs, "--clean")
 	}
 	composeArgs = append(composeArgs, commonArgs...)
@@ -144,7 +157,7 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 	composeCmd.Stdout = os.Stdout
 	composeCmd.Stderr = os.Stderr
 	composeCmd.Stdin = os.Stdin
-	cli.Println(sanitizeString(composeCmd.String(), keyringPassphrase))
+	cli.Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 	composeErr := composeCmd.Run()
 	if composeErr != nil {
 		handleCmdErr(composeErr)
@@ -152,15 +165,15 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 
 	fmt.Println()
 	bumpSyncArgs := []string{"bump", "--sync"}
-	if override != "" {
-		bumpSyncArgs = append(bumpSyncArgs, "--override", override)
+	if options.override != "" {
+		bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 	}
 	bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
 	syncCmd := exec.Command("plasmactl", bumpSyncArgs...)
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
-	cli.Println(sanitizeString(syncCmd.String(), keyringPassphrase))
+	cli.Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 	syncErr := syncCmd.Run()
 	if syncErr != nil {
 		handleCmdErr(syncErr)
@@ -187,7 +200,7 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-		cli.Println(sanitizeString(packageCmd.String(), keyringPassphrase))
+		cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase))
 		packageErr = packageCmd.Run()
 		if packageErr != nil {
 			return
