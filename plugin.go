@@ -221,7 +221,7 @@ func meta(environment, tags, keyringPassphrase, username, password, override str
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
-		cli.Println(sanitizeString(deployCmd.String(), keyringPassphrase))
+		// cli.Println(sanitizeString(deployCmd.String(), keyringPassphrase))
 		deployErr := deployCmd.Run()
 		if deployErr != nil {
 			handleCmdErr(deployErr)
