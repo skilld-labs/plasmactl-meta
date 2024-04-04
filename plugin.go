@@ -200,7 +200,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-		cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase))
+		//cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Prevent it to fill deploy stdin
 		packageErr = packageCmd.Run()
 		if packageErr != nil {
 			return
@@ -230,11 +230,11 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		}
 
 		deployCmd := exec.Command("plasmactl", deployCmdArgs...)
-		//deployCmd := keyringCmd("plasmactl", "deploy", environment, tags) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
+		//deployCmd := keyringCmd("plasmactl", deployCmdArgs...) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
-		// cli.Println(sanitizeString(deployCmd.String(), keyringPassphrase))
+		cli.Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
 		deployErr := deployCmd.Run()
 		if deployErr != nil {
 			handleCmdErr(deployErr)
