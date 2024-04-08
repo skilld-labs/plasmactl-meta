@@ -106,7 +106,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 	if save {
 		err = k.Save() // TODO: If new keyring and passphrase is defined, use new passphrase right away in all commands > requires keyring lib update to get passphrase
 		if err != nil {
-			log.Err("Error during saving keyring file", err)
+			handleCmdErr(err)
 		}
 	}
 	fmt.Println()
@@ -169,7 +169,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 	}
 	bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-	syncCmd := exec.Command("plasmactl", bumpSyncArgs...)
+	syncCmd := keyringCmd("plasmactl", bumpSyncArgs...)
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
@@ -200,7 +200,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-		//cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Prevent it to fill deploy stdin
+		//cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
 		packageErr = packageCmd.Run()
 		if packageErr != nil {
 			return
@@ -212,7 +212,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		publishCmd.Stdout = &publishStdOut
 		publishCmd.Stderr = &publishStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-		//cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears in deploy command stdin
+		//cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
 		publishErr = publishCmd.Run()
 		if publishErr != nil {
 			return
@@ -229,8 +229,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			deployCmdArgs = append(deployCmdArgs, "--debug")
 		}
 
-		deployCmd := exec.Command("plasmactl", deployCmdArgs...)
-		//deployCmd := keyringCmd("plasmactl", deployCmdArgs...) // TODO: Use after https://projects.skilld.cloud/skilld/pla-plasmactl/-/issues/67
+		deployCmd := keyringCmd("plasmactl", deployCmdArgs...)
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
