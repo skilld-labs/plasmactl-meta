@@ -62,11 +62,12 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Don't show usage help on a runtime error.
 			cmd.SilenceUsage = true
-			keyringPassphrase, err := cmd.Flags().GetString("keyring-passphrase")
+
+			err := ensureKeyringPassphraseSet(cmd, &options)
 			if err != nil {
-				log.Fatal("error while getting keyringPassphrase option value: ", err)
+				return err
 			}
-			options.keyringPassphrase = keyringPassphrase
+
 			verboseCount, err := cmd.Flags().GetCount("verbose")
 			if err != nil {
 				return err
@@ -87,9 +88,33 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 	return nil
 }
 
-func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
-	// Enter keyring passphrase:
+func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error {
+	keyringPassphrase, err := cmd.Flags().GetString("keyring-passphrase")
+	if err != nil {
+		log.Fatal("error while getting keyringPassphrase option value: ", err)
+	}
 
+	if keyringPassphrase == "" {
+		askPass := keyring.AskPassWithTerminal{}
+		passphrase, err := askPass.GetPass()
+		if err != nil {
+			return err
+		}
+
+		err = cmd.Flags().Set("keyring-passphrase", passphrase)
+		if err != nil {
+			return err
+		}
+
+		keyringPassphrase = passphrase
+	}
+
+	options.keyringPassphrase = keyringPassphrase
+
+	return nil
+}
+
+func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
 	// Check if publish command credentials are available in keyring and correct as stdin will not be availale in goroutine
 	artifactsRepositoryDomain := "https://repositories.skilld.cloud"
@@ -104,7 +129,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 	}
 	// If publish command credentials were not found in keyring, we add them
 	if save {
-		err = k.Save() // TODO: If new keyring and passphrase is defined, use new passphrase right away in all commands > requires keyring lib update to get passphrase
+		err = k.Save()
 		if err != nil {
 			handleCmdErr(err)
 		}
