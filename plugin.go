@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/launchrctl/launchr/pkg/cli"
 
@@ -87,8 +89,26 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 	return nil
 }
 
+func resetTerminal() {
+	cmd := exec.Command("stty", "sane")
+	cmd.Stdout = os.Stdout
+	_ = cmd.Run()
+}
+
+func handleSigInt() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		resetTerminal()
+		os.Exit(1)
+	}()
+}
+
 func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
 	// Enter keyring passphrase:
+
+	handleSigInt()
 
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
 	// Check if publish command credentials are available in keyring and correct as stdin will not be availale in goroutine
