@@ -303,7 +303,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 			return ci, false, err
 		} else if errors.Is(err, keyring.ErrNotFound) {
 			cli.Println("Keyring was unlocked or created successfully: publish credentials were not found")
-			return ci, false, errors.New("execute 'plasmactl login' to set 'https://repositories.skilld.cloud' credentials to keyring")
+			return ci, false, errors.New("execute 'plasmactl login --url=https://repositories.skilld.cloud' to add credentials to keyring")
 		} else if !errors.Is(err, keyring.ErrNotFound) {
 			log.Debug("%s", err)
 			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
