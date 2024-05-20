@@ -3,7 +3,7 @@ module github.com/skilld-labs/plasmactl-meta
 go 1.21
 
 require (
-	github.com/launchrctl/keyring v0.2.0
+	github.com/launchrctl/keyring v0.2.3
 	github.com/launchrctl/launchr v0.7.0
 	github.com/spf13/cobra v1.8.0
 )
