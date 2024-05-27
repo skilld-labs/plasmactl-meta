@@ -23,6 +23,10 @@ func init() {
 	launchr.RegisterPlugin(&Plugin{})
 }
 
+var (
+	errAddCredentials = errors.New("execute 'plasmactl login --url=https://repositories.skilld.cloud' to add credentials to keyring")
+)
+
 // Plugin is launchr plugin providing meta action.
 type Plugin struct {
 	k keyring.Keyring
@@ -44,8 +48,6 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 type metaOptions struct {
 	verboseCount      int
 	keyringPassphrase string
-	username          string
-	password          string
 	override          string
 	clean             bool
 	last              bool
@@ -78,8 +80,6 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
-	metaCmd.Flags().StringVarP(&options.username, "username", "", "", "Username for artifact repository")
-	metaCmd.Flags().StringVarP(&options.password, "password", "", "", "Password for artifact repository")
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
 	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for compose command")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for bump command")
@@ -96,17 +96,19 @@ func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error 
 
 	if keyringPassphrase == "" {
 		askPass := keyring.AskPassWithTerminal{}
-		passphrase, err := askPass.GetPass()
-		if err != nil {
-			return err
-		}
+		var passphrase string
+		var errGet error
 
-		err = cmd.Flags().Set("keyring-passphrase", passphrase)
-		if err != nil {
-			return err
+		passphrase, errGet = askPass.GetPass()
+		if errGet != nil {
+			return errGet
 		}
 
 		keyringPassphrase = passphrase
+		err = cmd.Flags().Set("keyring-passphrase", keyringPassphrase)
+		if err != nil {
+			return err
+		}
 	}
 
 	options.keyringPassphrase = keyringPassphrase
@@ -116,25 +118,17 @@ func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error 
 
 func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
-	// Check if publish command credentials are available in keyring and correct as stdin will not be availale in goroutine
+	// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
 	artifactsRepositoryDomain := "https://repositories.skilld.cloud"
 	var accessibilityCode int
 	if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
 		artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
 	}
 	cli.Println("Checking keyring...")
-	_, save, err := getCredentials(artifactsRepositoryDomain, options.username, options.password, k)
+	err := validateCredentials(artifactsRepositoryDomain, k)
 	if err != nil {
 		return err
 	}
-	// If publish command credentials were not found in keyring, we add them
-	if save {
-		err = k.Save()
-		if err != nil {
-			handleCmdErr(err)
-		}
-	}
-	fmt.Println()
 
 	var commonArgs []string
 	verbosity := ""
@@ -155,7 +149,6 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 
 	log.Info(fmt.Sprintf("environment: %s", environment))
 	log.Info(fmt.Sprintf("tags: %s", tags))
-	log.Info(fmt.Sprintf("username: %s", options.username))
 
 	// Commands executed sequentially
 
@@ -292,45 +285,29 @@ func handleCmdErr(cmdErr error) {
 	os.Exit(1)
 }
 
-func getCredentials(url, username, password string, k keyring.Keyring) (keyring.CredentialsItem, bool, error) {
+func validateCredentials(url string, k keyring.Keyring) error {
+	if !k.Exists() {
+		cli.Println("Keyring doesn't exist")
+		return errAddCredentials
+	}
+
 	ci, err := k.GetForURL(url)
-	save := false
 	if len(ci.URL) != 0 && len(ci.Username) != 0 && len(ci.Password) != 0 {
 		cli.Println("Keyring was unlocked successfully: publish credentials were found")
 	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrEmptyPass) {
-			return ci, false, err
+			return err
 		} else if errors.Is(err, keyring.ErrNotFound) {
-			cli.Println("Keyring was unlocked or created successfully: publish credentials were not found")
-			return ci, false, errors.New("execute 'plasmactl login --url=https://repositories.skilld.cloud' to add credentials to keyring")
+			cli.Println("Keyring was unlocked successfully: publish credentials were not found")
+			return errAddCredentials
 		} else if !errors.Is(err, keyring.ErrNotFound) {
 			log.Debug("%s", err)
-			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
+			return errors.New("the keyring is malformed or wrong passphrase provided")
 		}
-		ci = keyring.CredentialsItem{}
-		ci.URL = url
-		ci.Username = username
-		ci.Password = password
-		if ci.Username == "" || ci.Password == "" {
-			if ci.URL != "" {
-				cli.Println("Please add login and password for URL - %s", ci.URL)
-			}
-			err = keyring.RequestCredentialsFromTty(&ci)
-			if err != nil {
-				return ci, false, err
-			}
-		}
-
-		err = k.AddItem(ci)
-		if err != nil {
-			return ci, false, err
-		}
-
-		save = true
 	}
 
-	return ci, save, nil
+	return nil
 }
 
 func isURLAccessible(url string, code *int) bool {
