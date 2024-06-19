@@ -58,9 +58,10 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 	options := metaOptions{}
 
 	var metaCmd = &cobra.Command{
-		Use:   "meta [flags] environment tags",
-		Short: "Executes bump + compose + sync + package + publish + deploy",
-		Args:  cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
+		Use:     "meta [flags] environment tags",
+		Short:   "Executes bump + compose + sync + package + publish + deploy",
+		Aliases: []string{"deliver"},
+		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Don't show usage help on a runtime error.
 			cmd.SilenceUsage = true
