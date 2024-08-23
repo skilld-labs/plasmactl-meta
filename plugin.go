@@ -24,7 +24,7 @@ func init() {
 }
 
 var (
-	errAddCredentials = errors.New("execute 'plasmactl login --url=https://repositories.skilld.cloud' to add credentials to keyring")
+	tplAddCredentials = "execute '%s login --url=https://repositories.skilld.cloud' to add credentials to keyring" //nolint G101
 )
 
 // Plugin is launchr plugin providing meta action.
@@ -118,6 +118,9 @@ func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error 
 }
 
 func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
+	// Retrieve current binary name from args to use in consequent commands.
+	plasmaBinary := os.Args[0]
+
 	// Check if provided keyring pw is correct, since it will be used for multiple commands
 	// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
 	artifactsRepositoryDomain := "https://repositories.skilld.cloud"
@@ -126,7 +129,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
 	}
 	cli.Println("Checking keyring...")
-	err := validateCredentials(artifactsRepositoryDomain, k)
+	err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, k)
 	if err != nil {
 		return err
 	}
@@ -159,7 +162,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		bumpArgs = append(bumpArgs, "--last")
 	}
 	bumpArgs = append(bumpArgs, commonArgs...)
-	bumpCmd := exec.Command("plasmactl", bumpArgs...)
+	bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
 	bumpCmd.Stdout = os.Stdout
 	bumpCmd.Stderr = os.Stderr
 	bumpCmd.Stdin = os.Stdin
@@ -172,7 +175,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		composeArgs = append(composeArgs, "--clean")
 	}
 	composeArgs = append(composeArgs, commonArgs...)
-	composeCmd := keyringCmd("plasmactl", composeArgs...)
+	composeCmd := keyringCmd(plasmaBinary, composeArgs...)
 	composeCmd.Stdout = os.Stdout
 	composeCmd.Stderr = os.Stderr
 	composeCmd.Stdin = os.Stdin
@@ -188,7 +191,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 	}
 	bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-	syncCmd := keyringCmd("plasmactl", bumpSyncArgs...)
+	syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
 	syncCmd.Stdout = os.Stdout
 	syncCmd.Stderr = os.Stderr
 	syncCmd.Stdin = os.Stdin
@@ -215,7 +218,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		defer wg.Done()
 		packageCmdArgs := []string{"package"}
 		packageCmdArgs = append(packageCmdArgs, commonArgs...)
-		packageCmd := exec.Command("plasmactl", packageCmdArgs...)
+		packageCmd := exec.Command(plasmaBinary, packageCmdArgs...) //nolint G204
 		packageCmd.Stdout = &packageStdOut
 		packageCmd.Stderr = &packageStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
@@ -227,7 +230,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 
 		publishCmdArgs := []string{"publish"}
 		publishCmdArgs = append(publishCmdArgs, commonArgs...)
-		publishCmd := keyringCmd("plasmactl", publishCmdArgs...)
+		publishCmd := keyringCmd(plasmaBinary, publishCmdArgs...)
 		publishCmd.Stdout = &publishStdOut
 		publishCmd.Stderr = &publishStdErr
 		//publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
@@ -248,7 +251,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			deployCmdArgs = append(deployCmdArgs, "--debug")
 		}
 
-		deployCmd := keyringCmd("plasmactl", deployCmdArgs...)
+		deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
 		deployCmd.Stdout = os.Stdout
 		deployCmd.Stderr = os.Stderr
 		deployCmd.Stdin = os.Stdin
@@ -286,10 +289,10 @@ func handleCmdErr(cmdErr error) {
 	os.Exit(1)
 }
 
-func validateCredentials(url string, k keyring.Keyring) error {
+func validateCredentials(url, plasmaBinary string, k keyring.Keyring) error {
 	if !k.Exists() {
 		cli.Println("Keyring doesn't exist")
-		return errAddCredentials
+		return fmt.Errorf(tplAddCredentials, plasmaBinary)
 	}
 
 	ci, err := k.GetForURL(url)
@@ -301,7 +304,7 @@ func validateCredentials(url string, k keyring.Keyring) error {
 			return err
 		} else if errors.Is(err, keyring.ErrNotFound) {
 			cli.Println("Keyring was unlocked successfully: publish credentials were not found")
-			return errAddCredentials
+			return fmt.Errorf(tplAddCredentials, plasmaBinary)
 		} else if !errors.Is(err, keyring.ErrNotFound) {
 			log.Debug("%s", err)
 			return errors.New("the keyring is malformed or wrong passphrase provided")
