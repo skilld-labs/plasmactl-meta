@@ -438,6 +438,17 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 
 		// Check if response indicates success
 		if resp.StatusCode == http.StatusOK {
+			// Unmarshal the response body to extract the Job URL
+			var jsonResponse struct {
+				WebURL string `json:"web_url"`
+			}
+			if err := json.Unmarshal(body, &jsonResponse); err != nil {
+				return fmt.Errorf("failed to unmarshal job response: %v", err)
+			}
+
+			// Print the Job URL
+			fmt.Printf("Job URL: %s\n", jsonResponse.WebURL)
+
 			// Retrieve and print the job trace
 			err = getJobTrace(gitlabDomain, username, password, accessToken, projectID, jobID)
 			if err != nil {
