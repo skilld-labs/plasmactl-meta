@@ -261,7 +261,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		_ = bumpCmd.Run() //nolint
 
 		fmt.Println()
-		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
+		composeArgs := []string{"compose", "--conflicts-verbosity"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
