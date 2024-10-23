@@ -11,11 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/launchrctl/launchr/pkg/cli"
-
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
-	"github.com/launchrctl/launchr/pkg/log"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +24,8 @@ var tplAddCredentials = "execute '%s login --url=%s' to add credentials to keyri
 
 // Plugin is launchr plugin providing meta action.
 type Plugin struct {
-	k keyring.Keyring
+	k   keyring.Keyring
+	app launchr.App
 }
 
 // PluginInfo implements launchr.Plugin interface.
@@ -40,6 +38,7 @@ func (p *Plugin) PluginInfo() launchr.PluginInfo {
 // OnAppInit implements launchr.Plugin interface.
 func (p *Plugin) OnAppInit(app launchr.App) error {
 	app.GetService(&p.k)
+	p.app = app
 	return nil
 }
 
@@ -53,15 +52,15 @@ type metaOptions struct {
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
-func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
+func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 	options := metaOptions{}
 
-	metaCmd := &cobra.Command{
+	metaCmd := &launchr.Command{
 		Use:     "meta [flags] environment tags",
 		Short:   "Executes bump + compose + sync + package + publish + deploy",
 		Aliases: []string{"deliver"},
 		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *launchr.Command, args []string) error {
 			// Don't show usage help on a runtime error.
 			cmd.SilenceUsage = true
 
@@ -76,7 +75,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 			}
 			options.verboseCount = verboseCount
 
-			return meta(args[0], args[1], options, p.k)
+			return p.meta(args[0], args[1], options)
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
@@ -89,10 +88,10 @@ func (p *Plugin) CobraAddCommands(rootCmd *cobra.Command) error {
 	return nil
 }
 
-func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error {
+func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) error {
 	keyringPassphrase, err := cmd.Flags().GetString("keyring-passphrase")
 	if err != nil {
-		log.Fatal("error while getting keyringPassphrase option value: ", err)
+		return fmt.Errorf("error while getting keyring-passphrase option value: %w", err)
 	}
 
 	if keyringPassphrase == "" {
@@ -117,35 +116,35 @@ func ensureKeyringPassphraseSet(cmd *cobra.Command, options *metaOptions) error 
 	return nil
 }
 
-func meta(environment, tags string, options metaOptions, k keyring.Keyring) error {
+func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	// Retrieve current binary name from args to use in consequent commands.
 	plasmaBinary := os.Args[0]
+	streams := p.app.Streams()
 
 	var commonArgs []string
 	verbosity := ""
 	if options.verboseCount > 0 {
 		verbosity = "-" + strings.Repeat("v", options.verboseCount)
 		commonArgs = append(commonArgs, verbosity)
-		log.Debug("verbosity set as %q", verbosity)
+		launchr.Log().Debug("verbosity level", "level", verbosity)
 	}
 
-	log.Info(fmt.Sprintf("environment: %s", environment))
-	log.Info(fmt.Sprintf("tags: %s", tags))
+	launchr.Log().Info("arguments", "environment", environment, "tags", tags)
 
 	var username string
 	var password string
 
 	if options.ci {
-		cli.Println("Starting CI build")
+		launchr.Term().Info().Println("Starting CI build")
 
 		gitlabDomain := "https://projects.skilld.cloud"
-		log.Info("Getting %s credentials from keyring", gitlabDomain)
-		ci, save, err := getCredentials(gitlabDomain, username, password, k)
+		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
 		if err != nil {
 			return err
 		}
-		log.Info("URL: %s", ci.URL)
-		log.Info("Username: %s", ci.Username)
+		launchr.Term().Printfln("URL: %s", ci.URL)
+		launchr.Term().Printfln("Username: %s", ci.Username)
 
 		username := ci.Username
 		password := ci.Password
@@ -153,52 +152,52 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		comparisonRef := ""
 		if options.override != "" {
 			comparisonRef = options.override
-			log.Info("Comparison artifact override: %s", comparisonRef)
+			launchr.Term().Printfln("Comparison artifact override: %s", comparisonRef)
 		}
 
 		// Get OAuth token
 		accessToken, err := getOAuthToken(gitlabDomain, username, password)
 		if err != nil {
-			log.Fatal("Failed to get OAuth token: %v", err)
+			return fmt.Errorf("failed to get OAuth token: %w", err)
 		}
 
 		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api reuuest)
 		if save {
-			err = k.Save()
-			log.Debug("saving %s credentials to keyring", gitlabDomain)
+			err = p.k.Save()
+			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
 			if err != nil {
-				log.Err("Error during saving keyring file", err)
+				launchr.Log().Error("error during saving keyring file", "error", err)
 			}
 		}
 
 		// Get branch name
 		branchName, err := getBranchName()
 		if err != nil {
-			log.Fatal("Failed to get branch name: %v", err)
+			return fmt.Errorf("failed to get branch name: %w", err)
 		}
 
 		// Get repo name
 		repoName, err := getRepoName()
 		if err != nil {
-			log.Fatal("Failed to get repo name: %v", err)
+			return fmt.Errorf("failed to get repo name: %w", err)
 		}
 
 		// Get project ID
 		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
 		if err != nil {
-			log.Fatal("Failed to get ID of project '%s': %v", repoName, err)
+			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
 		}
 
 		// Trigger pipeline
 		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef)
 		if err != nil {
-			log.Fatal("Failed to trigger pipeline: %v", err)
+			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}
 
 		// Get all jobs in the pipeline
 		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
 		if err != nil {
-			log.Fatal("Failed to retrieve jobs in pipeline: %v", err)
+			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
 		}
 
 		// Find the target job ID
@@ -210,17 +209,17 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			}
 		}
 		if targetJobID == 0 {
-			log.Fatal("No %s job found in pipeline", targetJobName)
+			return fmt.Errorf("no %s job found in pipeline", targetJobName)
 		}
 
 		// Trigger the manual job
 		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
 		if err != nil {
-			log.Fatal("Failed to trigger manual job: %v", err)
+			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
 
 	} else {
-		cli.Println("Starting local build")
+		launchr.Term().Info().Println("Starting local build")
 
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
 		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
@@ -229,9 +228,9 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
 			artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
 		}
-		cli.Println("Checking keyring...")
+		launchr.Term().Println("Checking keyring...")
 		keyringEntryName := "Artifacts repository"
-		err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, k, keyringEntryName)
+		err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, p.k, keyringEntryName)
 		if err != nil {
 			return err
 		}
@@ -247,49 +246,49 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 
 		// Commands executed sequentially
 
-		fmt.Println()
+		launchr.Term().Println()
 		bumpArgs := []string{"bump"}
 		if options.last {
 			bumpArgs = append(bumpArgs, "--last")
 		}
 		bumpArgs = append(bumpArgs, commonArgs...)
 		bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-		bumpCmd.Stdout = os.Stdout
-		bumpCmd.Stderr = os.Stderr
-		bumpCmd.Stdin = os.Stdin
-		cli.Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+		bumpCmd.Stdout = streams.Out()
+		bumpCmd.Stderr = streams.Err()
+		bumpCmd.Stdin = streams.In()
+		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
 		_ = bumpCmd.Run() //nolint
 
-		fmt.Println()
+		launchr.Term().Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
-		composeCmd.Stdout = os.Stdout
-		composeCmd.Stderr = os.Stderr
-		composeCmd.Stdin = os.Stdin
-		cli.Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
+		composeCmd.Stdout = streams.Out()
+		composeCmd.Stderr = streams.Err()
+		composeCmd.Stdin = streams.In()
+		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
 		if composeErr != nil {
-			handleCmdErr(composeErr)
+			return handleCmdErr(composeErr, "compose error")
 		}
 
-		fmt.Println()
+		launchr.Term().Println()
 		bumpSyncArgs := []string{"bump", "--sync"}
 		if options.override != "" {
 			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
 		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
-		syncCmd.Stdout = os.Stdout
-		syncCmd.Stderr = os.Stderr
-		syncCmd.Stdin = os.Stdin
-		cli.Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
+		syncCmd.Stdout = streams.Out()
+		syncCmd.Stderr = streams.Err()
+		syncCmd.Stdin = streams.In()
+		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 		syncErr := syncCmd.Run()
 		if syncErr != nil {
-			handleCmdErr(syncErr)
+			return handleCmdErr(syncErr, "sync error")
 		}
 
 		// Commands executed in parallel
@@ -302,7 +301,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 		var publishStdErr bytes.Buffer
 		var publishErr error
 
-		fmt.Println()
+		launchr.Term().Println()
 		wg := &sync.WaitGroup{}
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
@@ -316,6 +315,7 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
 			packageErr = packageCmd.Run()
 			if packageErr != nil {
+				publishErr = handleCmdErr(packageErr, "package error")
 				return
 			}
 
@@ -328,10 +328,12 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
 			publishErr = publishCmd.Run()
 			if publishErr != nil {
+				publishErr = handleCmdErr(publishErr, "publish error")
 				return
 			}
 		}(wg)
 
+		var deployErr error
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
@@ -343,62 +345,74 @@ func meta(environment, tags string, options metaOptions, k keyring.Keyring) erro
 			}
 
 			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
-			deployCmd.Stdout = os.Stdout
-			deployCmd.Stderr = os.Stderr
-			deployCmd.Stdin = os.Stdin
-			cli.Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
-			deployErr := deployCmd.Run()
+			deployCmd.Stdout = streams.Out()
+			deployCmd.Stderr = streams.Err()
+			deployCmd.Stdin = streams.In()
+			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
+			deployErr = deployCmd.Run()
 			if deployErr != nil {
-				handleCmdErr(deployErr)
+				deployErr = handleCmdErr(deployErr, "deploy error")
+				return
 			}
 		}(wg)
 		wg.Wait()
 
-		fmt.Println()
-		fmt.Println(packageStdOut.String())
-		fmt.Println(packageStdErr.String())
-		if packageErr != nil {
-			handleCmdErr(packageErr)
+		if packageStdOut.Len() > 0 {
+			launchr.Term().Println()
+			launchr.Term().Println("package stdout:")
+			launchr.Term().Println(packageStdOut.String())
+		}
+		if packageStdErr.Len() > 0 {
+			launchr.Term().Println("package stderr:")
+			launchr.Term().Println(packageStdErr.String())
+		}
+		if publishStdOut.Len() > 0 {
+			launchr.Term().Println()
+			launchr.Term().Println("publish stdout:")
+			launchr.Term().Println(publishStdOut.String())
+		}
+		if publishStdErr.Len() > 0 {
+			launchr.Term().Println("publish stderr:")
+			launchr.Term().Println(publishStdErr.String())
 		}
 
-		fmt.Println(publishStdOut.String())
-		fmt.Println(publishStdErr.String())
-		if publishErr != nil {
-			handleCmdErr(publishErr)
+		// Return all error messages, the first error code will be used as a result.
+		errJoin := errors.Join(packageErr, publishErr, deployErr)
+		if errJoin != nil {
+			return errJoin
 		}
 
 	}
 	return nil
 }
 
-func handleCmdErr(cmdErr error) {
+func handleCmdErr(cmdErr error, msg string) error {
 	var exitErr *exec.ExitError
 	if errors.As(cmdErr, &exitErr) {
-		os.Exit(exitErr.ExitCode())
+		return launchr.NewExitError(exitErr.ExitCode(), msg)
 	}
 
-	fmt.Println("Error:", cmdErr)
-	os.Exit(1)
+	return cmdErr
 }
 
 func validateCredentials(url, plasmaBinary string, k keyring.Keyring, keyringEntryName string) error {
 	if !k.Exists() {
-		cli.Println("Keyring doesn't exist")
+		launchr.Term().Error().Println("Keyring doesn't exist")
 		return fmt.Errorf(tplAddCredentials, plasmaBinary, url)
 	}
 
 	ci, err := k.GetForURL(url)
 	if len(ci.URL) != 0 && len(ci.Username) != 0 && len(ci.Password) != 0 {
-		cli.Println("Keyring was unlocked successfully: %s credentials were found", keyringEntryName)
+		launchr.Term().Success().Println("Keyring was unlocked successfully: %s credentials were found", keyringEntryName)
 	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrEmptyPass) {
 			return err
 		} else if errors.Is(err, keyring.ErrNotFound) {
-			cli.Println("Keyring was unlocked successfully: %s credentials were not found", keyringEntryName)
+			launchr.Term().Success().Println("Keyring was unlocked successfully: %s credentials were not found", keyringEntryName)
 			return fmt.Errorf(tplAddCredentials, plasmaBinary, url)
 		} else if !errors.Is(err, keyring.ErrNotFound) {
-			log.Debug("%s", err)
+			launchr.Log().Error("error", "error", err)
 			return errors.New("the keyring is malformed or wrong passphrase provided")
 		}
 	}
@@ -413,7 +427,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 		if errors.Is(err, keyring.ErrEmptyPass) {
 			return ci, false, err
 		} else if !errors.Is(err, keyring.ErrNotFound) {
-			log.Debug("%s", err)
+			launchr.Log().Error("error", "error", err)
 			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
 		}
 		ci = keyring.CredentialsItem{}
@@ -422,7 +436,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 		ci.Password = password
 		if ci.Username == "" || ci.Password == "" {
 			if ci.URL != "" {
-				cli.Println("Please add login and password for URL - %s", ci.URL)
+				launchr.Term().Info().Printfln("Please add login and password for URL - %s", ci.URL)
 			}
 			err = keyring.RequestCredentialsFromTty(&ci)
 			if err != nil {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -12,17 +12,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/launchrctl/launchr/pkg/log"
+	"github.com/launchrctl/launchr"
 )
 
 const targetJobName = "platform:deploy"
 
-// OAuth token response
+// OAuthResponse is a struct to parse OAuth response.
 type OAuthResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
-// Pipeline response
+// PipelineResponse is a struct to parse OAuth response.
 type PipelineResponse struct {
 	ID             int    `json:"id"`
 	WebURL         string `json:"web_url"`
@@ -44,7 +44,7 @@ type Job struct {
 func getOAuthToken(gitlabDomain, username, password string) (string, error) {
 	// Prepare the OAuth request
 	oauthURL := fmt.Sprintf("%s/oauth/token", gitlabDomain)
-	log.Debug("OAuth token request URL: %s\n", oauthURL)
+	launchr.Log().Debug("OAuth token request URL", "url", oauthURL)
 
 	data := url.Values{}
 	data.Set("grant_type", "password")
@@ -68,11 +68,11 @@ func getOAuthToken(gitlabDomain, username, password string) (string, error) {
 	defer resp.Body.Close()
 
 	// Read response body
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	log.Debug("OAuth token response: %s\n", body)
+	launchr.Log().Debug("OAuth token response", "body", body)
 
 	// Parse JSON response to extract access token
 	var oauthResp OAuthResponse
@@ -106,7 +106,7 @@ func getRepoName() (string, error) {
 
 func getProjectID(gitlabDomain, username, password, accessToken, repoName string) (string, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects?search=%s&access_token=%s", gitlabDomain, url.QueryEscape(repoName), accessToken)
-	log.Debug("GitLab API URL for project search: %s\n", apiURL)
+	launchr.Log().Debug("GitLab API URL for project search", "url", apiURL)
 
 	// Create the request
 	req, err := http.NewRequest("GET", apiURL, nil)
@@ -122,7 +122,7 @@ func getProjectID(gitlabDomain, username, password, accessToken, repoName string
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -141,7 +141,7 @@ func getProjectID(gitlabDomain, username, password, accessToken, repoName string
 
 func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources, comparisonRef string) (int, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipeline?access_token=%s", gitlabDomain, projectID, accessToken)
-	log.Debug("GitLab API URL for triggering pipeline: %s\n", apiURL)
+	launchr.Log().Debug("GitLab API URL for triggering pipeline", "url", apiURL)
 
 	// Prepare the variables to pass during pipeline creation
 	data := map[string]interface{}{
@@ -160,7 +160,7 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 
 	// Only add OVERRIDDEN_COMPARISON_REF if provided
 	if comparisonRef != "" {
-		log.Info("Appending OVERRIDDEN_COMPARISON_REF to other pipelines variables")
+		launchr.Log().Info("Appending OVERRIDDEN_COMPARISON_REF to other pipelines variables")
 		data["variables"] = append(data["variables"].([]map[string]string), map[string]string{
 			"key":   "OVERRIDDEN_COMPARISON_REF",
 			"value": comparisonRef,
@@ -171,10 +171,10 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	if err != nil {
 		return 0, err
 	}
-	log.Debug("JSON data for triggering pipeline: %s\n", jsonData)
+	launchr.Log().Debug("JSON data for triggering pipeline", "json", jsonData)
 
 	// Create the request
-	fmt.Printf("Creating CI pipeline...\n")
+	launchr.Term().Info().Printfln("Creating CI pipeline...")
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return 0, err
@@ -189,11 +189,11 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, err
 	}
-	log.Debug("GitLab API response for triggering pipeline: %s\n", body)
+	launchr.Log().Debug("GitLab API response for triggering pipeline", "body", body)
 
 	// Parse the response JSON to extract pipeline info
 	var pipelineResp PipelineResponse
@@ -203,7 +203,7 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	}
 
 	// Print Pipeline URL only once
-	fmt.Printf("Pipeline URL: %s\n", pipelineResp.WebURL)
+	launchr.Term().Printfln("Pipeline URL: %s", pipelineResp.WebURL)
 
 	// Return the pipeline ID
 	return pipelineResp.ID, nil
@@ -211,7 +211,7 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 
 func getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID string, pipelineID int) ([]Job, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipelines/%d/jobs?access_token=%s", gitlabDomain, projectID, pipelineID, accessToken)
-	log.Debug("GitLab API URL for retrieving jobs: %s\n", apiURL)
+	launchr.Log().Debug("GitLab API URL for retrieving jobs", "url", apiURL)
 
 	// Create the request
 	req, err := http.NewRequest("GET", apiURL, nil)
@@ -227,11 +227,11 @@ func getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID 
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	log.Debug("GitLab API response for jobs: %s\n", body)
+	launchr.Log().Debug("GitLab API response for job", "body", body)
 
 	// Parse the jobs in the pipeline
 	var jobs []Job
@@ -246,7 +246,7 @@ func getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID 
 // Function to retrieve and continuously print the job trace
 func getJobTrace(gitlabDomain, username, password, accessToken, projectID string, jobID int) error {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/trace?access_token=%s", gitlabDomain, projectID, jobID, accessToken)
-	log.Debug("GitLab API URL for retrieving job trace: %s\n", apiURL)
+	launchr.Log().Debug("GitLab API URL for retrieving job trace", "url", apiURL)
 
 	const maxRetries = 20               // Retry up to 20 times to ensure job has started
 	const retryDelay = 10 * time.Second // Wait 10 seconds between retries
@@ -259,16 +259,16 @@ func getJobTrace(gitlabDomain, username, password, accessToken, projectID string
 		}
 
 		if len(traceContent) > 0 {
-			fmt.Println("Job has started!")
+			launchr.Term().Println("Job has started!")
 			break
 		}
 
-		fmt.Printf("Waiting for job to start...\n")
+		launchr.Term().Println("Waiting for job to start...")
 		time.Sleep(retryDelay)
 	}
 
 	// Start tailing the job trace
-	fmt.Println("Now tailing job's trace:")
+	launchr.Term().Println("Now tailing job's trace:")
 	var lastLength int // Keeps track of how much trace has already been printed
 
 	for {
@@ -280,20 +280,20 @@ func getJobTrace(gitlabDomain, username, password, accessToken, projectID string
 		if len(traceContent) > lastLength {
 			// Print only new trace content
 			newContent := traceContent[lastLength:]
-			fmt.Print(newContent)
+			launchr.Term().Print(newContent)
 			lastLength = len(traceContent)
 		}
 
 		// If the trace has not changed for a while, assume it's still running
 		if len(traceContent) == lastLength {
-			fmt.Print(".") // Indicate waiting
+			launchr.Term().Print(".") // Indicate waiting
 		}
 
 		// Determine job completion status
 		statusCode, completed := jobCompleted(traceContent)
 		if completed {
 			if statusCode == 0 {
-				fmt.Println("\nEnd of trace.")
+				launchr.Term().Println("\nEnd of trace.")
 				return nil // Exit with code 0
 			}
 			// If the job failed, return an error with the corresponding exit code
@@ -345,7 +345,7 @@ func fetchTrace(apiURL, username, password string) (string, error) {
 	defer resp.Body.Close()
 
 	// Read the response body (the trace)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -355,7 +355,7 @@ func fetchTrace(apiURL, username, password string) (string, error) {
 
 func triggerManualJob(gitlabDomain, username, password, accessToken, projectID string, jobID int, pipelineID int) error {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/play?access_token=%s", gitlabDomain, projectID, jobID, accessToken)
-	log.Debug("GitLab API URL for triggering manual job: %s\n", apiURL)
+	launchr.Log().Debug("GitLab API URL for triggering manual job", "url", apiURL)
 
 	// Retry parameters
 	const maxRetries = 100
@@ -408,7 +408,7 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 
 		// If there are still jobs in progress, list them and wait before retrying
 		if len(inProgress) > 0 {
-			fmt.Printf("Waiting for previous jobs to finish: %v...\n", inProgress)
+			launchr.Term().Printfln("Waiting for previous jobs to finish: %v...", inProgress)
 			time.Sleep(retryDelay)
 			continue
 		}
@@ -429,12 +429,11 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 		}
 		defer resp.Body.Close()
 
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}
-		log.Debug("GitLab API response for triggering manual job: %s\n", body)
-		log.Debug("HTTP Status Code: %d\n", resp.StatusCode)
+		launchr.Log().Debug("GitLab API response for triggering manual job", "body", body, "http_code", resp.StatusCode)
 
 		// Check if response indicates success
 		if resp.StatusCode == http.StatusOK {
@@ -447,7 +446,7 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 			}
 
 			// Print the Job URL
-			fmt.Printf("Job URL: %s\n", jsonResponse.WebURL)
+			launchr.Term().Printfln("Job URL: %s", jsonResponse.WebURL)
 
 			// Retrieve and print the job trace
 			err = getJobTrace(gitlabDomain, username, password, accessToken, projectID, jobID)
@@ -459,7 +458,7 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 
 		// Handle unplayable job response
 		if strings.Contains(string(body), "Unplayable Job") {
-			fmt.Printf("%s job cannot be played yet. Retrying in %v...\n", targetJobName, retryDelay)
+			launchr.Term().Printfln("%s job cannot be played yet. Retrying in %v...", targetJobName, retryDelay)
 			time.Sleep(retryDelay)
 		} else {
 			return fmt.Errorf("failed to trigger job: %s", resp.Status)
