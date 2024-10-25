@@ -264,7 +264,8 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		_ = bumpCmd.Run() //nolint
 
 		println("6")
-		launchr.Term().Println()
+		//launchr.Term().Println()
+		fmt.Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		println("7")
 		if options.clean {
