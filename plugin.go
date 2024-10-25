@@ -119,7 +119,6 @@ func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) erro
 func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	// Retrieve current binary name from args to use in consequent commands.
 	plasmaBinary := os.Args[0]
-	streams := p.app.Streams()
 
 	var commonArgs []string
 	verbosity := ""
@@ -256,9 +255,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		println("4")
 		bumpArgs = append(bumpArgs, commonArgs...)
 		bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-		bumpCmd.Stdout = streams.Out()
-		bumpCmd.Stderr = streams.Err()
-		bumpCmd.Stdin = streams.In()
+		bumpCmd.Stdout = os.Stdout
+		bumpCmd.Stderr = os.Stderr
+		bumpCmd.Stdin = os.Stdin
 		println("5")
 		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
 		println("5.1")
@@ -275,9 +274,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		println("8")
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
-		composeCmd.Stdout = streams.Out()
-		composeCmd.Stderr = streams.Err()
-		composeCmd.Stdin = streams.In()
+		composeCmd.Stdout = os.Stdout
+		composeCmd.Stderr = os.Stderr
+		composeCmd.Stdin = os.Stdin
 		println("9")
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
@@ -294,9 +293,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
 		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
-		syncCmd.Stdout = streams.Out()
-		syncCmd.Stderr = streams.Err()
-		syncCmd.Stdin = streams.In()
+		syncCmd.Stdout = os.Stdout
+		syncCmd.Stderr = os.Stderr
+		syncCmd.Stdin = os.Stdin
 		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 		syncErr := syncCmd.Run()
 		if syncErr != nil {
@@ -357,9 +356,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			}
 
 			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
-			deployCmd.Stdout = streams.Out()
-			deployCmd.Stderr = streams.Err()
-			deployCmd.Stdin = streams.In()
+			deployCmd.Stdout = os.Stdout
+			deployCmd.Stderr = os.Stderr
+			deployCmd.Stdin = os.Stdin
 			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
 			deployErr = deployCmd.Run()
 			if deployErr != nil {
