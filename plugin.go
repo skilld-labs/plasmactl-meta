@@ -220,7 +220,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 	} else {
 		launchr.Term().Info().Println("Starting local build")
-
+		println("1")
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
 		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
 		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
@@ -234,6 +234,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		if err != nil {
 			return err
 		}
+		println("2")
 
 		// Appending --keyring-passphrase to commands
 		keyringCmd := func(command string, args ...string) *exec.Cmd {
@@ -246,35 +247,44 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Commands executed sequentially
 
+		println("3")
 		launchr.Term().Println()
 		bumpArgs := []string{"bump"}
 		if options.last {
 			bumpArgs = append(bumpArgs, "--last")
 		}
+		println("4")
 		bumpArgs = append(bumpArgs, commonArgs...)
 		bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
 		bumpCmd.Stdout = streams.Out()
 		bumpCmd.Stderr = streams.Err()
 		bumpCmd.Stdin = streams.In()
+		println("5")
 		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
 		_ = bumpCmd.Run() //nolint
 
+		println("6")
 		launchr.Term().Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
+		println("7")
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
+		println("8")
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
 		composeCmd.Stdout = streams.Out()
 		composeCmd.Stderr = streams.Err()
 		composeCmd.Stdin = streams.In()
+		println("9")
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
+		println("10")
 		if composeErr != nil {
 			return handleCmdErr(composeErr, "compose error")
 		}
 
+		println("11")
 		launchr.Term().Println()
 		bumpSyncArgs := []string{"bump", "--sync"}
 		if options.override != "" {
