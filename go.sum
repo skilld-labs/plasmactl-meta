@@ -224,8 +224,8 @@ github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3x
 github.com/kr/pty v1.1.1/go.mod h1:pFQYn66WHrOpPYNljwOMqo10TkYh1fy3cYio2l3bCsQ=
 github.com/kr/text v0.1.0 h1:45sCR5RtlFHMR4UwH9sdQ5TC8v0qDQCHnXt+kaKSTVE=
 github.com/kr/text v0.1.0/go.mod h1:4Jbv+DJW3UT/LiOwJeYQe1efqtUx/iVham/4vfdArNI=
-github.com/launchrctl/keyring v0.2.5 h1:NbGquLfWNwydL0+oHV2ltUj9Dj+W+2v5PeqFBHaIEKY=
-github.com/launchrctl/keyring v0.2.5/go.mod h1:uBHC4ekh6hJikEA8YGlY1LDCi3iF3RBCvty0E4oZebA=
+github.com/launchrctl/keyring v0.2.6 h1:R4MbNmlTw7M+Oz/ai/ikTPsbY3k+DVtnAvInYsO83PA=
+github.com/launchrctl/keyring v0.2.6/go.mod h1:VIjbUHBeMRkbp9gmRWpyIiRzSU9cdiSPCXdJl1RItCk=
 github.com/launchrctl/launchr v0.16.4 h1:uVbRLZZQuTGhjDBN8kLpdPGeZZkpBjiiSjCxDEmeM6g=
 github.com/launchrctl/launchr v0.16.4/go.mod h1:EGMn1cGbaGEpo+eQyJVdlq9BO3OSIDP60BOPS2odDxo=
 github.com/lithammer/fuzzysearch v1.1.8 h1:/HIuJnjHuXS8bKaiTMeeDlW2/AyIWk2brx1V8LFgLN4=

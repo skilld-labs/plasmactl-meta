@@ -43,6 +43,7 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 }
 
 type metaOptions struct {
+	bin               string
 	verboseCount      int
 	keyringPassphrase string
 	override          string
@@ -54,7 +55,10 @@ type metaOptions struct {
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
-	options := metaOptions{}
+	options := metaOptions{
+		// Retrieve current bin name from args to use in consequent commands.
+		bin: os.Args[0],
+	}
 
 	metaCmd := &launchr.Command{
 		Use:     "meta [flags] environment tags",
@@ -118,11 +122,17 @@ func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) erro
 	return nil
 }
 
-func (p *Plugin) meta(environment, tags string, options metaOptions) error {
-	// Retrieve current binary name from args to use in consequent commands.
-	plasmaBinary := os.Args[0]
+func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
 	streams := p.app.Streams()
+	cmd := exec.Command(command, args...)
+	cmd.Stdout = streams.Out()
+	cmd.Stderr = streams.Err()
+	// Set directly because it's a file. Exec command has special treatment for [*os.File] input.
+	cmd.Stdin = os.Stdin
+	return cmd
+}
 
+func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	var commonArgs []string
 	verbosity := ""
 	if options.verboseCount > 0 {
@@ -232,18 +242,17 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 		launchr.Term().Println("Checking keyring...")
 		keyringEntryName := "Artifacts repository"
-		err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, p.k, keyringEntryName)
+		err := validateCredentials(artifactsRepositoryDomain, options.bin, p.k, keyringEntryName)
 		if err != nil {
 			return err
 		}
 
 		// Appending --keyring-passphrase to commands
-		keyringCmd := func(command string, args ...string) *exec.Cmd {
+		keyringCmd := func(cmd *exec.Cmd) *exec.Cmd {
 			if options.keyringPassphrase != "" {
-				args = append(args, "--keyring-passphrase", options.keyringPassphrase)
+				cmd.Args = append(cmd.Args, "--keyring-passphrase", options.keyringPassphrase)
 			}
-
-			return exec.Command(command, args...)
+			return cmd
 		}
 
 		// Commands executed sequentially
@@ -254,10 +263,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 				bumpArgs = append(bumpArgs, "--last")
 			}
 			bumpArgs = append(bumpArgs, commonArgs...)
-			bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-			bumpCmd.Stdout = streams.Out()
-			bumpCmd.Stderr = streams.Err()
-			bumpCmd.Stdin = streams.In()
+			bumpCmd := keyringCmd(p.createCommand(options.bin, bumpArgs...))
 			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
 			_ = bumpCmd.Run() //nolint
 			launchr.Term().Println()
@@ -270,10 +276,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			composeArgs = append(composeArgs, "--clean")
 		}
 		composeArgs = append(composeArgs, commonArgs...)
-		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
-		composeCmd.Stdout = streams.Out()
-		composeCmd.Stderr = streams.Err()
-		composeCmd.Stdin = streams.In()
+		composeCmd := keyringCmd(p.createCommand(options.bin, composeArgs...))
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
 		if composeErr != nil {
@@ -286,10 +289,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
-		syncCmd.Stdout = streams.Out()
-		syncCmd.Stderr = streams.Err()
-		syncCmd.Stdin = streams.In()
+		syncCmd := keyringCmd(p.createCommand(options.bin, bumpSyncArgs...))
 		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 		syncErr := syncCmd.Run()
 		if syncErr != nil {
@@ -311,12 +311,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
-			packageCmdArgs := []string{"package"}
-			packageCmdArgs = append(packageCmdArgs, commonArgs...)
-			packageCmd := exec.Command(plasmaBinary, packageCmdArgs...) //nolint G204
+			packageCmdArgs := append([]string{"package"}, commonArgs...)
+			packageCmd := p.createCommand(options.bin, packageCmdArgs...)
 			packageCmd.Stdout = &packageStdOut
 			packageCmd.Stderr = &packageStdErr
-			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			packageCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
 			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
 			packageErr = packageCmd.Run()
 			if packageErr != nil {
@@ -324,12 +323,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 				return
 			}
 
-			publishCmdArgs := []string{"publish"}
-			publishCmdArgs = append(publishCmdArgs, commonArgs...)
-			publishCmd := keyringCmd(plasmaBinary, publishCmdArgs...)
+			publishCmdArgs := append([]string{"publish"}, commonArgs...)
+			publishCmd := keyringCmd(p.createCommand(options.bin, publishCmdArgs...))
 			publishCmd.Stdout = &publishStdOut
 			publishCmd.Stderr = &publishStdErr
-			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			publishCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
 			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
 			publishErr = publishCmd.Run()
 			if publishErr != nil {
@@ -349,10 +347,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 				deployCmdArgs = append(deployCmdArgs, "--debug")
 			}
 
-			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
-			deployCmd.Stdout = streams.Out()
-			deployCmd.Stderr = streams.Err()
-			deployCmd.Stdin = streams.In()
+			deployCmd := keyringCmd(p.createCommand(options.bin, deployCmdArgs...))
 			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
 			deployErr = deployCmd.Run()
 			if deployErr != nil {

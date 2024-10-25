@@ -5,7 +5,7 @@ go 1.23.1
 toolchain go1.23.2
 
 require (
-	github.com/launchrctl/keyring v0.2.5
+	github.com/launchrctl/keyring v0.2.6
 	github.com/launchrctl/launchr v0.16.4
 	github.com/spf13/cobra v1.8.1
 )
