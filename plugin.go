@@ -49,6 +49,7 @@ type metaOptions struct {
 	clean             bool
 	last              bool
 	ci                bool
+	skipBump          bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
@@ -80,9 +81,10 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"})
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
-	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for compose command")
-	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for bump command")
+	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command")
+	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
 	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Execute all commands and deploy in CI")
+	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of local bump command")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -246,20 +248,23 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Commands executed sequentially
 
-		launchr.Term().Println()
-		bumpArgs := []string{"bump"}
-		if options.last {
-			bumpArgs = append(bumpArgs, "--last")
+		if !options.skipBump {
+			bumpArgs := []string{"bump"}
+			if options.last {
+				bumpArgs = append(bumpArgs, "--last")
+			}
+			bumpArgs = append(bumpArgs, commonArgs...)
+			bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
+			bumpCmd.Stdout = streams.Out()
+			bumpCmd.Stderr = streams.Err()
+			bumpCmd.Stdin = streams.In()
+			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+			_ = bumpCmd.Run() //nolint
+			launchr.Term().Println()
+		} else {
+			launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
 		}
-		bumpArgs = append(bumpArgs, commonArgs...)
-		bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-		bumpCmd.Stdout = streams.Out()
-		bumpCmd.Stderr = streams.Err()
-		bumpCmd.Stdin = streams.In()
-		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-		_ = bumpCmd.Run() //nolint
 
-		launchr.Term().Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
