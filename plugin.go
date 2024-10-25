@@ -49,6 +49,7 @@ type metaOptions struct {
 	clean             bool
 	last              bool
 	ci                bool
+	skipBump          bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
@@ -83,6 +84,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for compose command")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for bump command")
 	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Execute all commands and deploy in CI")
+	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip bump command execution")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -219,7 +221,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 	} else {
 		launchr.Term().Info().Println("Starting local build")
-		println("1")
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
 		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
 		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
@@ -233,7 +234,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		if err != nil {
 			return err
 		}
-		println("2")
 
 		// Appending --keyring-passphrase to commands
 		keyringCmd := func(command string, args ...string) *exec.Cmd {
@@ -246,46 +246,41 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Commands executed sequentially
 
-		println("3")
-		launchr.Term().Println()
-		bumpArgs := []string{"bump"}
-		if options.last {
+		if !options.skipBump {
 			bumpArgs = append(bumpArgs, "--last")
+			launchr.Term().Println()
+			bumpArgs := []string{"bump"}
+			if options.last {
+				bumpArgs = append(bumpArgs, "--last")
+			}
+			bumpArgs = append(bumpArgs, commonArgs...)
+			bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
+			bumpCmd.Stdout = os.Stdout
+			bumpCmd.Stderr = os.Stderr
+			bumpCmd.Stdin = os.Stdin
+			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+			_ = bumpCmd.Run() //nolint
+		} else {
+			launchr.Log().Info("--skip-bump option detected: Skipping bump execution")
 		}
-		println("4")
-		bumpArgs = append(bumpArgs, commonArgs...)
-		bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-		bumpCmd.Stdout = os.Stdout
-		bumpCmd.Stderr = os.Stderr
-		bumpCmd.Stdin = os.Stdin
-		println("5")
-		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-		println("5.1")
-		_ = bumpCmd.Run() //nolint
 
-		println("6")
 		//launchr.Term().Println()
 		//fmt.Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
-		println("7")
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
-		println("8")
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
 		composeCmd.Stdout = os.Stdout
 		composeCmd.Stderr = os.Stderr
 		composeCmd.Stdin = os.Stdin
-		println("9")
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
-		println("10")
 		if composeErr != nil {
 			return handleCmdErr(composeErr, "compose error")
 		}
 
-		println("11")
 		launchr.Term().Println()
 		bumpSyncArgs := []string{"bump", "--sync"}
 		if options.override != "" {
