@@ -121,6 +121,7 @@ func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) erro
 func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	// Retrieve current binary name from args to use in consequent commands.
 	plasmaBinary := os.Args[0]
+	streams := p.app.Streams()
 
 	var commonArgs []string
 	verbosity := ""
@@ -221,6 +222,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 	} else {
 		launchr.Term().Info().Println("Starting local build")
+
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
 		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
 		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
@@ -246,6 +248,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Commands executed sequentially
 
+		launchr.Term().Println()
 		if !options.skipBump {
 			bumpArgs = append(bumpArgs, "--last")
 			launchr.Term().Println()
@@ -264,17 +267,16 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			launchr.Log().Info("--skip-bump option detected: Skipping bump execution")
 		}
 
-		//launchr.Term().Println()
-		//fmt.Println()
+		launchr.Term().Println()
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
-		composeCmd.Stdout = os.Stdout
-		composeCmd.Stderr = os.Stderr
-		composeCmd.Stdin = os.Stdin
+		composeCmd.Stdout = streams.Out()
+		composeCmd.Stderr = streams.Err()
+		composeCmd.Stdin = streams.In()
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
 		if composeErr != nil {
@@ -288,9 +290,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
 		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
-		syncCmd.Stdout = os.Stdout
-		syncCmd.Stderr = os.Stderr
-		syncCmd.Stdin = os.Stdin
+		syncCmd.Stdout = streams.Out()
+		syncCmd.Stderr = streams.Err()
+		syncCmd.Stdin = streams.In()
 		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 		syncErr := syncCmd.Run()
 		if syncErr != nil {
@@ -351,9 +353,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			}
 
 			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
-			deployCmd.Stdout = os.Stdout
-			deployCmd.Stderr = os.Stderr
-			deployCmd.Stdin = os.Stdin
+			deployCmd.Stdout = streams.Out()
+			deployCmd.Stderr = streams.Err()
+			deployCmd.Stdin = streams.In()
 			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
 			deployErr = deployCmd.Run()
 			if deployErr != nil {
