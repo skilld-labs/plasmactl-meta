@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -47,10 +48,11 @@ type metaOptions struct {
 	verboseCount      int
 	keyringPassphrase string
 	override          string
-	clean             bool
 	last              bool
-	ci                bool
 	skipBump          bool
+	ci                bool
+	local             bool
+	clean             bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
@@ -62,7 +64,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 
 	metaCmd := &launchr.Command{
 		Use:     "meta [flags] environment tags",
-		Short:   "Executes bump + compose + sync + package + publish + deploy",
+		Short:   "Push code + bump and deploy in CI (compose + sync + package + publish + deploy)",
 		Aliases: []string{"deliver"},
 		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
 		RunE: func(cmd *launchr.Command, args []string) error {
@@ -83,12 +85,13 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 			return p.meta(args[0], args[1], options)
 		},
 	}
-	metaCmd.SetArgs([]string{"environment", "tags"})
+	metaCmd.SetArgs([]string{"environment", "tags"}) //TODO: Deprecate tags usage, default to all
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
-	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
-	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Execute all commands and deploy in CI")
-	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of local bump command")
+	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
+	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
+	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
+	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -133,6 +136,11 @@ func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
 }
 
 func (p *Plugin) meta(environment, tags string, options metaOptions) error {
+
+	if options.ci {
+		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
+	}
+
 	var commonArgs []string
 	verbosity := ""
 	if options.verboseCount > 0 {
@@ -146,91 +154,37 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	var username string
 	var password string
 
-	if options.ci {
-		launchr.Term().Info().Println("Starting CI build")
+	// Commit unversioned changes if any
+	err := commitChangesIfAny()
+	if err != nil {
+		log.Fatalf("error: %v", err)
+	}
 
-		gitlabDomain := "https://projects.skilld.cloud"
-		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
-		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
-		if err != nil {
-			return err
+	// Execute bump
+	if !options.skipBump {
+		bumpArgs := []string{"bump"}
+		if options.last {
+			bumpArgs = append(bumpArgs, "--last")
 		}
-		launchr.Term().Printfln("URL: %s", ci.URL)
-		launchr.Term().Printfln("Username: %s", ci.Username)
-
-		username := ci.Username
-		password := ci.Password
-
-		comparisonRef := ""
-		if options.override != "" {
-			comparisonRef = options.override
-			launchr.Term().Printfln("Comparison artifact override: %s", comparisonRef)
+		bumpArgs = append(bumpArgs, commonArgs...)
+		bumpCmd := p.createCommand(options.bin, bumpArgs...)
+		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+		bumpErr := bumpCmd.Run()
+		if bumpErr != nil {
+			return handleCmdErr(bumpErr, "bump error")
 		}
-
-		// Get OAuth token
-		accessToken, err := getOAuthToken(gitlabDomain, username, password)
-		if err != nil {
-			return fmt.Errorf("failed to get OAuth token: %w", err)
-		}
-
-		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api reuuest)
-		if save {
-			err = p.k.Save()
-			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
-			if err != nil {
-				launchr.Log().Error("error during saving keyring file", "error", err)
-			}
-		}
-
-		// Get branch name
-		branchName, err := getBranchName()
-		if err != nil {
-			return fmt.Errorf("failed to get branch name: %w", err)
-		}
-
-		// Get repo name
-		repoName, err := getRepoName()
-		if err != nil {
-			return fmt.Errorf("failed to get repo name: %w", err)
-		}
-
-		// Get project ID
-		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
-		if err != nil {
-			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
-		}
-
-		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef)
-		if err != nil {
-			return fmt.Errorf("failed to trigger pipeline: %w", err)
-		}
-
-		// Get all jobs in the pipeline
-		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
-		if err != nil {
-			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
-		}
-
-		// Find the target job ID
-		var targetJobID int
-		for _, job := range jobs {
-			if job.Name == targetJobName {
-				targetJobID = job.ID
-				break
-			}
-		}
-		if targetJobID == 0 {
-			return fmt.Errorf("no %s job found in pipeline", targetJobName)
-		}
-
-		// Trigger the manual job
-		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
-		if err != nil {
-			return fmt.Errorf("failed to trigger manual job: %w", err)
-		}
-
 	} else {
+		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
+	}
+	launchr.Term().Printf("\n")
+
+	// Push un-pushed commits if any
+	if err := pushCommitsIfAny(); err != nil {
+		launchr.Term().Info().Println("TEST")
+		return fmt.Errorf("Error: %w", err)
+	}
+
+	if options.local {
 		launchr.Term().Info().Println("Starting local build")
 
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
@@ -256,20 +210,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 
 		// Commands executed sequentially
-
-		if !options.skipBump {
-			bumpArgs := []string{"bump"}
-			if options.last {
-				bumpArgs = append(bumpArgs, "--last")
-			}
-			bumpArgs = append(bumpArgs, commonArgs...)
-			bumpCmd := keyringCmd(p.createCommand(options.bin, bumpArgs...))
-			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-			_ = bumpCmd.Run() //nolint
-			launchr.Term().Println()
-		} else {
-			launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
-		}
 
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		if options.clean {
@@ -380,6 +320,90 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		errJoin := errors.Join(packageErr, publishErr, deployErr)
 		if errJoin != nil {
 			return errJoin
+		}
+
+	} else {
+		launchr.Term().Info().Println("Starting CI build (now default behavior)")
+
+		gitlabDomain := "https://projects.skilld.cloud"
+		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
+		if err != nil {
+			return err
+		}
+		launchr.Term().Printfln("URL: %s", ci.URL)
+		launchr.Term().Printfln("Username: %s", ci.Username)
+
+		username := ci.Username
+		password := ci.Password
+
+		comparisonRef := ""
+		if options.override != "" {
+			comparisonRef = options.override
+			launchr.Term().Printfln("Comparison artifact override: %s", comparisonRef)
+		}
+
+		// Get OAuth token
+		accessToken, err := getOAuthToken(gitlabDomain, username, password)
+		if err != nil {
+			return fmt.Errorf("failed to get OAuth token: %w", err)
+		}
+
+		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api request)
+		if save {
+			err = p.k.Save()
+			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
+			if err != nil {
+				launchr.Log().Error("error during saving keyring file", "error", err)
+			}
+		}
+
+		// Get branch name
+		branchName, err := getBranchName()
+		if err != nil {
+			return fmt.Errorf("failed to get branch name: %w", err)
+		}
+
+		// Get repo name
+		repoName, err := getRepoName()
+		if err != nil {
+			return fmt.Errorf("failed to get repo name: %w", err)
+		}
+
+		// Get project ID
+		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
+		if err != nil {
+			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
+		}
+
+		// Trigger pipeline
+		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef)
+		if err != nil {
+			return fmt.Errorf("failed to trigger pipeline: %w", err)
+		}
+
+		// Get all jobs in the pipeline
+		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
+		}
+
+		// Find the target job ID
+		var targetJobID int
+		for _, job := range jobs {
+			if job.Name == targetJobName {
+				targetJobID = job.ID
+				break
+			}
+		}
+		if targetJobID == 0 {
+			return fmt.Errorf("no %s job found in pipeline", targetJobName)
+		}
+
+		// Trigger the manual job
+		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
+		if err != nil {
+			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
 
 	}
