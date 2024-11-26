@@ -85,7 +85,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 			return p.meta(args[0], args[1], options)
 		},
 	}
-	metaCmd.SetArgs([]string{"environment", "tags"}) //TODO: Deprecate tags usage, default to all
+	metaCmd.SetArgs([]string{"environment", "tags"}) // TODO: Deprecate tags usage, default to all
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
 	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
@@ -136,7 +136,6 @@ func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
 }
 
 func (p *Plugin) meta(environment, tags string, options metaOptions) error {
-
 	if options.ci {
 		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
 	}
@@ -177,12 +176,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
 	}
 	launchr.Term().Printf("\n")
-
-	// Push un-pushed commits if any
-	if err := pushCommitsIfAny(); err != nil {
-		launchr.Term().Info().Println("TEST")
-		return fmt.Errorf("Error: %w", err)
-	}
 
 	if options.local {
 		launchr.Term().Info().Println("Starting local build")
@@ -324,6 +317,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 	} else {
 		launchr.Term().Info().Println("Starting CI build (now default behavior)")
+
+		// Push un-pushed commits if any
+		if err := pushCommitsIfAny(); err != nil {
+			return fmt.Errorf("Error: %w", err)
+		}
 
 		gitlabDomain := "https://projects.skilld.cloud"
 		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
