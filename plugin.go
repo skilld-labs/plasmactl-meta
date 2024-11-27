@@ -53,6 +53,7 @@ type metaOptions struct {
 	ci                bool
 	local             bool
 	clean             bool
+	debug             bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
@@ -92,6 +93,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
 	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
 	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
+	metaCmd.Flags().BoolVar(&options.debug, "debug", false, "Run Ansible in debug mode")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -279,6 +281,9 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			if verbosity != "" {
 				deployCmdArgs = append(deployCmdArgs, "--debug")
 			}
+			if options.debug {
+				deployCmdArgs = append(deployCmdArgs, "--debug")
+			}
 
 			deployCmd := keyringCmd(p.createCommand(options.bin, deployCmdArgs...))
 			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
@@ -341,6 +346,15 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			launchr.Term().Printfln("Comparison artifact override: %s", comparisonRef)
 		}
 
+		ansibleDebug := false
+		if options.debug == true {
+			ansibleDebug = options.debug
+			launchr.Term().Printfln("Ansible debug mode: %s", ansibleDebug)
+		}
+		println("XXXXXXXXXXXXXXXX")
+		println(ansibleDebug)
+		println("XXXXXXXXXXXXXXXX")
+
 		// Get OAuth token
 		accessToken, err := getOAuthToken(gitlabDomain, username, password)
 		if err != nil {
@@ -375,7 +389,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 
 		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef)
+		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef, ansibleDebug)
 		if err != nil {
 			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}

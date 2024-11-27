@@ -139,7 +139,7 @@ func getProjectID(gitlabDomain, username, password, accessToken, repoName string
 	return fmt.Sprintf("%.0f", projects[0]["id"].(float64)), nil
 }
 
-func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources, comparisonRef string) (int, error) {
+func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources, comparisonRef string, ansibleDebug bool) (int, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipeline?access_token=%s", gitlabDomain, projectID, accessToken)
 	launchr.Log().Debug("GitLab API URL for triggering pipeline", "url", apiURL)
 
@@ -160,10 +160,18 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 
 	// Only add OVERRIDDEN_COMPARISON_REF if provided
 	if comparisonRef != "" {
-		launchr.Log().Info("Appending OVERRIDDEN_COMPARISON_REF to other pipelines variables")
+		launchr.Log().Info("Appending OVERRIDDEN_COMPARISON_REF to pipelines variables")
 		data["variables"] = append(data["variables"].([]map[string]string), map[string]string{
 			"key":   "OVERRIDDEN_COMPARISON_REF",
 			"value": comparisonRef,
+		})
+	}
+	// Only add BUILD_DEBUG_MODE if provided
+	if ansibleDebug == true {
+		launchr.Log().Info("Appending BUILD_DEBUG_MODE to pipelines variables")
+		data["variables"] = append(data["variables"].([]map[string]string), map[string]string{
+			"key":   "BUILD_DEBUG_MODE",
+			"value": strconv.FormatBool(ansibleDebug),
 		})
 	}
 
