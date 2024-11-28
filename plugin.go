@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -44,27 +43,22 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 }
 
 type metaOptions struct {
-	bin               string
 	verboseCount      int
 	keyringPassphrase string
 	override          string
-	last              bool
-	skipBump          bool
-	ci                bool
-	local             bool
 	clean             bool
+	last              bool
+	ci                bool
+	skipBump          bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
-	options := metaOptions{
-		// Retrieve current bin name from args to use in consequent commands.
-		bin: os.Args[0],
-	}
+	options := metaOptions{}
 
 	metaCmd := &launchr.Command{
 		Use:     "meta [flags] environment tags",
-		Short:   "Push code + bump and deploy in CI (compose + sync + package + publish + deploy)",
+		Short:   "Executes bump + compose + sync + package + publish + deploy",
 		Aliases: []string{"deliver"},
 		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
 		RunE: func(cmd *launchr.Command, args []string) error {
@@ -85,13 +79,12 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 			return p.meta(args[0], args[1], options)
 		},
 	}
-	metaCmd.SetArgs([]string{"environment", "tags"}) // TODO: Deprecate tags usage, default to all
+	metaCmd.SetArgs([]string{"environment", "tags"})
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
+	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
-	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
-	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
-	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
-	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
+	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Execute all commands and deploy in CI")
+	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of local bump command")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -125,20 +118,10 @@ func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) erro
 	return nil
 }
 
-func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
-	streams := p.app.Streams()
-	cmd := exec.Command(command, args...)
-	cmd.Stdout = streams.Out()
-	cmd.Stderr = streams.Err()
-	// Set directly because it's a file. Exec command has special treatment for [*os.File] input.
-	cmd.Stdin = os.Stdin
-	return cmd
-}
-
 func (p *Plugin) meta(environment, tags string, options metaOptions) error {
-	if options.ci {
-		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
-	}
+	// Retrieve current binary name from args to use in consequent commands.
+	plasmaBinary := os.Args[0]
+	streams := p.app.Streams()
 
 	var commonArgs []string
 	verbosity := ""
@@ -153,175 +136,8 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 	var username string
 	var password string
 
-	// Commit unversioned changes if any
-	err := commitChangesIfAny()
-	if err != nil {
-		log.Fatalf("error: %v", err)
-	}
-
-	// Execute bump
-	if !options.skipBump {
-		bumpArgs := []string{"bump"}
-		if options.last {
-			bumpArgs = append(bumpArgs, "--last")
-		}
-		bumpArgs = append(bumpArgs, commonArgs...)
-		bumpCmd := p.createCommand(options.bin, bumpArgs...)
-		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-		bumpErr := bumpCmd.Run()
-		if bumpErr != nil {
-			return handleCmdErr(bumpErr, "bump error")
-		}
-	} else {
-		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
-	}
-	launchr.Term().Printf("\n")
-
-	if options.local {
-		launchr.Term().Info().Println("Starting local build")
-
-		// Check if provided keyring pw is correct, since it will be used for multiple commands
-		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
-		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
-		var accessibilityCode int
-		if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
-			artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
-		}
-		launchr.Term().Println("Checking keyring...")
-		keyringEntryName := "Artifacts repository"
-		err := validateCredentials(artifactsRepositoryDomain, options.bin, p.k, keyringEntryName)
-		if err != nil {
-			return err
-		}
-
-		// Appending --keyring-passphrase to commands
-		keyringCmd := func(cmd *exec.Cmd) *exec.Cmd {
-			if options.keyringPassphrase != "" {
-				cmd.Args = append(cmd.Args, "--keyring-passphrase", options.keyringPassphrase)
-			}
-			return cmd
-		}
-
-		// Commands executed sequentially
-
-		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
-		if options.clean {
-			composeArgs = append(composeArgs, "--clean")
-		}
-		composeArgs = append(composeArgs, commonArgs...)
-		composeCmd := keyringCmd(p.createCommand(options.bin, composeArgs...))
-		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
-		composeErr := composeCmd.Run()
-		if composeErr != nil {
-			return handleCmdErr(composeErr, "compose error")
-		}
-
-		launchr.Term().Println()
-		bumpSyncArgs := []string{"bump", "--sync"}
-		if options.override != "" {
-			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
-		}
-		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-		syncCmd := keyringCmd(p.createCommand(options.bin, bumpSyncArgs...))
-		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
-		syncErr := syncCmd.Run()
-		if syncErr != nil {
-			return handleCmdErr(syncErr, "sync error")
-		}
-
-		// Commands executed in parallel
-
-		var packageStdOut bytes.Buffer
-		var packageStdErr bytes.Buffer
-		var packageErr error
-
-		var publishStdOut bytes.Buffer
-		var publishStdErr bytes.Buffer
-		var publishErr error
-
-		launchr.Term().Println()
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		go func(wg *sync.WaitGroup) {
-			defer wg.Done()
-			packageCmdArgs := append([]string{"package"}, commonArgs...)
-			packageCmd := p.createCommand(options.bin, packageCmdArgs...)
-			packageCmd.Stdout = &packageStdOut
-			packageCmd.Stderr = &packageStdErr
-			packageCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
-			packageErr = packageCmd.Run()
-			if packageErr != nil {
-				publishErr = handleCmdErr(packageErr, "package error")
-				return
-			}
-
-			publishCmdArgs := append([]string{"publish"}, commonArgs...)
-			publishCmd := keyringCmd(p.createCommand(options.bin, publishCmdArgs...))
-			publishCmd.Stdout = &publishStdOut
-			publishCmd.Stderr = &publishStdErr
-			publishCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
-			publishErr = publishCmd.Run()
-			if publishErr != nil {
-				publishErr = handleCmdErr(publishErr, "publish error")
-				return
-			}
-		}(wg)
-
-		var deployErr error
-		wg.Add(1)
-		go func(wg *sync.WaitGroup) {
-			defer wg.Done()
-			deployCmdArgs := []string{"platform:deploy"}
-			deployCmdArgs = append(deployCmdArgs, environment)
-			deployCmdArgs = append(deployCmdArgs, tags)
-			if verbosity != "" {
-				deployCmdArgs = append(deployCmdArgs, "--debug")
-			}
-
-			deployCmd := keyringCmd(p.createCommand(options.bin, deployCmdArgs...))
-			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
-			deployErr = deployCmd.Run()
-			if deployErr != nil {
-				deployErr = handleCmdErr(deployErr, "deploy error")
-				return
-			}
-		}(wg)
-		wg.Wait()
-
-		if packageStdOut.Len() > 0 {
-			launchr.Term().Println()
-			launchr.Term().Println("package stdout:")
-			launchr.Term().Println(packageStdOut.String())
-		}
-		if packageStdErr.Len() > 0 {
-			launchr.Term().Println("package stderr:")
-			launchr.Term().Println(packageStdErr.String())
-		}
-		if publishStdOut.Len() > 0 {
-			launchr.Term().Println()
-			launchr.Term().Println("publish stdout:")
-			launchr.Term().Println(publishStdOut.String())
-		}
-		if publishStdErr.Len() > 0 {
-			launchr.Term().Println("publish stderr:")
-			launchr.Term().Println(publishStdErr.String())
-		}
-
-		// Return all error messages, the first error code will be used as a result.
-		errJoin := errors.Join(packageErr, publishErr, deployErr)
-		if errJoin != nil {
-			return errJoin
-		}
-
-	} else {
-		launchr.Term().Info().Println("Starting CI build (now default behavior)")
-
-		// Push un-pushed commits if any
-		if err := pushCommitsIfAny(); err != nil {
-			return fmt.Errorf("Error: %w", err)
-		}
+	if options.ci {
+		launchr.Term().Info().Println("Starting CI build")
 
 		gitlabDomain := "https://projects.skilld.cloud"
 		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
@@ -347,7 +163,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			return fmt.Errorf("failed to get OAuth token: %w", err)
 		}
 
-		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api request)
+		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api reuuest)
 		if save {
 			err = p.k.Save()
 			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
@@ -402,6 +218,173 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to trigger manual job: %w", err)
+		}
+
+	} else {
+		launchr.Term().Info().Println("Starting local build")
+
+		// Check if provided keyring pw is correct, since it will be used for multiple commands
+		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
+		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
+		var accessibilityCode int
+		if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
+			artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
+		}
+		launchr.Term().Println("Checking keyring...")
+		keyringEntryName := "Artifacts repository"
+		err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, p.k, keyringEntryName)
+		if err != nil {
+			return err
+		}
+
+		// Appending --keyring-passphrase to commands
+		keyringCmd := func(command string, args ...string) *exec.Cmd {
+			if options.keyringPassphrase != "" {
+				args = append(args, "--keyring-passphrase", options.keyringPassphrase)
+			}
+
+			return exec.Command(command, args...)
+		}
+
+		// Commands executed sequentially
+
+		if !options.skipBump {
+			bumpArgs := []string{"bump"}
+			if options.last {
+				bumpArgs = append(bumpArgs, "--last")
+			}
+			bumpArgs = append(bumpArgs, commonArgs...)
+			bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
+			bumpCmd.Stdout = streams.Out()
+			bumpCmd.Stderr = streams.Err()
+			bumpCmd.Stdin = streams.In()
+			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+			_ = bumpCmd.Run() //nolint
+			launchr.Term().Println()
+		} else {
+			launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
+		}
+
+		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
+		if options.clean {
+			composeArgs = append(composeArgs, "--clean")
+		}
+		composeArgs = append(composeArgs, commonArgs...)
+		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
+		composeCmd.Stdout = streams.Out()
+		composeCmd.Stderr = streams.Err()
+		composeCmd.Stdin = streams.In()
+		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
+		composeErr := composeCmd.Run()
+		if composeErr != nil {
+			return handleCmdErr(composeErr, "compose error")
+		}
+
+		launchr.Term().Println()
+		bumpSyncArgs := []string{"bump", "--sync"}
+		if options.override != "" {
+			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
+		}
+		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
+		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
+		syncCmd.Stdout = streams.Out()
+		syncCmd.Stderr = streams.Err()
+		syncCmd.Stdin = streams.In()
+		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
+		syncErr := syncCmd.Run()
+		if syncErr != nil {
+			return handleCmdErr(syncErr, "sync error")
+		}
+
+		// Commands executed in parallel
+
+		var packageStdOut bytes.Buffer
+		var packageStdErr bytes.Buffer
+		var packageErr error
+
+		var publishStdOut bytes.Buffer
+		var publishStdErr bytes.Buffer
+		var publishErr error
+
+		launchr.Term().Println()
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		go func(wg *sync.WaitGroup) {
+			defer wg.Done()
+			packageCmdArgs := []string{"package"}
+			packageCmdArgs = append(packageCmdArgs, commonArgs...)
+			packageCmd := exec.Command(plasmaBinary, packageCmdArgs...) //nolint G204
+			packageCmd.Stdout = &packageStdOut
+			packageCmd.Stderr = &packageStdErr
+			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
+			packageErr = packageCmd.Run()
+			if packageErr != nil {
+				publishErr = handleCmdErr(packageErr, "package error")
+				return
+			}
+
+			publishCmdArgs := []string{"publish"}
+			publishCmdArgs = append(publishCmdArgs, commonArgs...)
+			publishCmd := keyringCmd(plasmaBinary, publishCmdArgs...)
+			publishCmd.Stdout = &publishStdOut
+			publishCmd.Stderr = &publishStdErr
+			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
+			publishErr = publishCmd.Run()
+			if publishErr != nil {
+				publishErr = handleCmdErr(publishErr, "publish error")
+				return
+			}
+		}(wg)
+
+		var deployErr error
+		wg.Add(1)
+		go func(wg *sync.WaitGroup) {
+			defer wg.Done()
+			deployCmdArgs := []string{"platform:deploy"}
+			deployCmdArgs = append(deployCmdArgs, environment)
+			deployCmdArgs = append(deployCmdArgs, tags)
+			if verbosity != "" {
+				deployCmdArgs = append(deployCmdArgs, "--debug")
+			}
+
+			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
+			deployCmd.Stdout = streams.Out()
+			deployCmd.Stderr = streams.Err()
+			deployCmd.Stdin = streams.In()
+			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
+			deployErr = deployCmd.Run()
+			if deployErr != nil {
+				deployErr = handleCmdErr(deployErr, "deploy error")
+				return
+			}
+		}(wg)
+		wg.Wait()
+
+		if packageStdOut.Len() > 0 {
+			launchr.Term().Println()
+			launchr.Term().Println("package stdout:")
+			launchr.Term().Println(packageStdOut.String())
+		}
+		if packageStdErr.Len() > 0 {
+			launchr.Term().Println("package stderr:")
+			launchr.Term().Println(packageStdErr.String())
+		}
+		if publishStdOut.Len() > 0 {
+			launchr.Term().Println()
+			launchr.Term().Println("publish stdout:")
+			launchr.Term().Println(publishStdOut.String())
+		}
+		if publishStdErr.Len() > 0 {
+			launchr.Term().Println("publish stderr:")
+			launchr.Term().Println(publishStdErr.String())
+		}
+
+		// Return all error messages, the first error code will be used as a result.
+		errJoin := errors.Join(packageErr, publishErr, deployErr)
+		if errJoin != nil {
+			return errJoin
 		}
 
 	}
