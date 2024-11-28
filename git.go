@@ -118,8 +118,29 @@ func pushCommitsIfAny() error {
 }
 
 func pushBranchIfNotRemote() error {
+	// Verify the remote name
+	cmdRemote := exec.Command("git", "remote")
+	var remoteOut bytes.Buffer
+	cmdRemote.Stdout = &remoteOut
+	if err := cmdRemote.Run(); err != nil {
+		return fmt.Errorf("failed to list remotes: %w", err)
+	}
+
+	// Ensure "origin" exists in the list of remotes
+	remoteList := strings.Split(strings.TrimSpace(remoteOut.String()), "\n")
+	hasOrigin := false
+	for _, remote := range remoteList {
+		if strings.TrimSpace(remote) == "origin" {
+			hasOrigin = true
+			break
+		}
+	}
+	if !hasOrigin {
+		return fmt.Errorf("git remote server 'origin' not found; please ensure a remote server named 'origin' exists")
+	}
+
 	// Fetch updates to ensure we have the latest remote information
-	cmdFetch := exec.Command("git", "fetch", "--quiet")
+	cmdFetch := exec.Command("git", "fetch", "--quiet", "origin")
 	if err := cmdFetch.Run(); err != nil {
 		return fmt.Errorf("failed to fetch updates: %w", err)
 	}
@@ -156,7 +177,7 @@ func pushBranchIfNotRemote() error {
 		}
 		launchr.Term().Info().Println("Successfully pushed branch")
 	} else {
-		launchr.Log().Debug("Branch '%s' is already exists remotely", "branch", branchName)
+		launchr.Log().Debug("Branch '%s' already exists remotely", "branch", branchName)
 	}
 
 	return nil
