@@ -72,7 +72,7 @@ func getOAuthToken(gitlabDomain, username, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	launchr.Log().Debug("OAuth token response", "body", body)
+	launchr.Log().Debug("OAuth token response", "body", string(body))
 
 	// Parse JSON response to extract access token
 	var oauthResp OAuthResponse
@@ -106,7 +106,7 @@ func getRepoName() (string, error) {
 
 func getProjectID(gitlabDomain, username, password, accessToken, repoName string) (string, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects?search=%s&access_token=%s", gitlabDomain, url.QueryEscape(repoName), accessToken)
-	launchr.Log().Debug("GitLab API URL for project search", "url", apiURL)
+	launchr.Log().Debug("GitLab API URL to get project ID", "url", apiURL)
 
 	// Create the request
 	req, err := http.NewRequest("GET", apiURL, nil)
@@ -167,7 +167,7 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 		})
 	}
 	// Only add BUILD_DEBUG_MODE if provided
-	if ansibleDebug == true {
+	if ansibleDebug {
 		launchr.Log().Info("Appending BUILD_DEBUG_MODE to pipelines variables")
 		data["variables"] = append(data["variables"].([]map[string]string), map[string]string{
 			"key":   "BUILD_DEBUG_MODE",
@@ -179,7 +179,7 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	if err != nil {
 		return 0, err
 	}
-	launchr.Log().Debug("JSON data for triggering pipeline", "json", jsonData)
+	launchr.Log().Debug("JSON data for triggering pipeline", "json", string(jsonData))
 
 	// Create the request
 	launchr.Term().Info().Printfln("Creating CI pipeline...")
@@ -187,8 +187,11 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	if err != nil {
 		return 0, err
 	}
+
 	req.SetBasicAuth(username, password)
 	req.Header.Set("Content-Type", "application/json")
+
+	launchr.Log().Debug("Request for triggering pipeline", "request", req)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -201,7 +204,13 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 	if err != nil {
 		return 0, err
 	}
-	launchr.Log().Debug("GitLab API response for triggering pipeline", "body", body)
+	bodyStr := string(body)
+	launchr.Log().Debug("Response for triggering pipeline", "body", bodyStr)
+
+	// Check if the response contains "Reference not found"
+	if strings.Contains(strings.ToLower(bodyStr), "reference not found") {
+		return 0, fmt.Errorf("git branch not found: %s", bodyStr)
+	}
 
 	// Parse the response JSON to extract pipeline info
 	var pipelineResp PipelineResponse
@@ -239,7 +248,7 @@ func getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID 
 	if err != nil {
 		return nil, err
 	}
-	launchr.Log().Debug("GitLab API response for job", "body", body)
+	//launchr.Log().Debug("GitLab API response for job", "body", body)
 
 	// Parse the jobs in the pipeline
 	var jobs []Job
@@ -441,7 +450,7 @@ func triggerManualJob(gitlabDomain, username, password, accessToken, projectID s
 		if err != nil {
 			return err
 		}
-		launchr.Log().Debug("GitLab API response for triggering manual job", "body", body, "http_code", resp.StatusCode)
+		launchr.Log().Debug("GitLab API response for triggering manual job", "body", string(body), "http_code", resp.StatusCode)
 
 		// Check if response indicates success
 		if resp.StatusCode == http.StatusOK {

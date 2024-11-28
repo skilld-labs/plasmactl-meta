@@ -116,3 +116,48 @@ func pushCommitsIfAny() error {
 
 	return nil
 }
+
+func pushBranchIfNotRemote() error {
+	// Fetch updates to ensure we have the latest remote information
+	cmdFetch := exec.Command("git", "fetch", "--quiet")
+	if err := cmdFetch.Run(); err != nil {
+		return fmt.Errorf("failed to fetch updates: %w", err)
+	}
+
+	// Get the current git status with tracking information
+	cmdStatus := exec.Command("git", "status", "-sb")
+	var statusOut bytes.Buffer
+	cmdStatus.Stdout = &statusOut
+	if err := cmdStatus.Run(); err != nil {
+		return fmt.Errorf("failed to get git status: %w", err)
+	}
+
+	// Parse the output of `git status -sb`
+	status := strings.TrimSpace(statusOut.String())
+	if !strings.HasPrefix(status, "##") {
+		return fmt.Errorf("unexpected git status output: %s", status)
+	}
+
+	// Extract branch info
+	statusLine := strings.TrimPrefix(status, "## ")
+	parts := strings.Split(statusLine, "...")
+	branchName := parts[0]
+
+	if len(parts) == 1 {
+		// No remote tracking information means the branch is local-only
+		launchr.Term().Info().Printf("Branch '%s' exists locally but not remotely: Pushing...\n", branchName)
+
+		// Push the branch to the remote
+		cmdPush := exec.Command("git", "push", "--set-upstream", "origin", branchName)
+		cmdPush.Stdout = &statusOut
+		cmdPush.Stderr = &statusOut
+		if err := cmdPush.Run(); err != nil {
+			return fmt.Errorf("failed to push branch '%s': %w", branchName, err)
+		}
+		launchr.Term().Info().Println("Successfully pushed branch")
+	} else {
+		launchr.Log().Debug("Branch '%s' is already exists remotely", "branch", branchName)
+	}
+
+	return nil
+}

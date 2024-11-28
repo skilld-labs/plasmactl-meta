@@ -5,6 +5,7 @@ go 1.23.1
 toolchain go1.23.2
 
 require (
+	github.com/davecgh/go-spew v1.1.1
 	github.com/go-git/go-git/v5 v5.12.0
 	github.com/launchrctl/keyring v0.2.6
 	github.com/launchrctl/launchr v0.16.4

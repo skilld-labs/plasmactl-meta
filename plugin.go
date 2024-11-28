@@ -324,6 +324,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		launchr.Term().Info().Println("Starting CI build (now default behavior)")
 
 		// Push un-pushed commits if any
+		if err := pushBranchIfNotRemote(); err != nil {
+			return fmt.Errorf("Error: %w", err)
+		}
+
+		// Push un-pushed commits if any
 		if err := pushCommitsIfAny(); err != nil {
 			return fmt.Errorf("Error: %w", err)
 		}
