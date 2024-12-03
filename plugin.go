@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -43,22 +44,28 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 }
 
 type metaOptions struct {
+	bin               string
 	verboseCount      int
 	keyringPassphrase string
 	override          string
-	clean             bool
 	last              bool
-	ci                bool
 	skipBump          bool
+	ci                bool
+	local             bool
+	clean             bool
+	debug             bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
 func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
-	options := metaOptions{}
+	options := metaOptions{
+		// Retrieve current bin name from args to use in consequent commands.
+		bin: os.Args[0],
+	}
 
 	metaCmd := &launchr.Command{
 		Use:     "meta [flags] environment tags",
-		Short:   "Executes bump + compose + sync + package + publish + deploy",
+		Short:   "Push code + bump and deploy in CI (compose + sync + package + publish + deploy)",
 		Aliases: []string{"deliver"},
 		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
 		RunE: func(cmd *launchr.Command, args []string) error {
@@ -79,12 +86,14 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 			return p.meta(args[0], args[1], options)
 		},
 	}
-	metaCmd.SetArgs([]string{"environment", "tags"})
+	metaCmd.SetArgs([]string{"environment", "tags"}) // TODO: Deprecate tags usage, default to all
 	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
-	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
-	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Execute all commands and deploy in CI")
-	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of local bump command")
+	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
+	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
+	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
+	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
+	metaCmd.Flags().BoolVar(&options.debug, "debug", false, "Run Ansible in debug mode")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -118,109 +127,74 @@ func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) erro
 	return nil
 }
 
-func (p *Plugin) meta(environment, tags string, options metaOptions) error {
-	// Retrieve current binary name from args to use in consequent commands.
-	plasmaBinary := os.Args[0]
+func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
 	streams := p.app.Streams()
+	cmd := exec.Command(command, args...)
+	cmd.Stdout = streams.Out()
+	cmd.Stderr = streams.Err()
+	// Set directly because it's a file. Exec command has special treatment for [*os.File] input.
+	cmd.Stdin = os.Stdin
+	return cmd
+}
+
+func (p *Plugin) meta(environment, tags string, options metaOptions) error {
+	if options.ci {
+		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
+	}
+
+	launchr.Log().Info("arguments", "environment", environment, "tags", tags)
 
 	var commonArgs []string
 	verbosity := ""
 	if options.verboseCount > 0 {
+		// TODO: Remove once 'verboseCount, err := cmd.Flags().GetCount("verbose")"' is fixed
+		if options.verboseCount > 4 {
+			options.verboseCount /= 2
+		}
+		// Repeat 'v' as many times as in options.verboseCount
 		verbosity = "-" + strings.Repeat("v", options.verboseCount)
 		commonArgs = append(commonArgs, verbosity)
 		launchr.Log().Debug("verbosity level", "level", verbosity)
 	}
 
-	launchr.Log().Info("arguments", "environment", environment, "tags", tags)
+	comparisonRef := options.override
+	if comparisonRef != "" {
+		launchr.Term().Info().Printfln("Comparison artifact override: %s", comparisonRef)
+	}
+
+	ansibleDebug := options.debug
+	if ansibleDebug {
+		launchr.Term().Info().Printfln("Ansible debug mode: %t", ansibleDebug)
+	}
 
 	var username string
 	var password string
 
-	if options.ci {
-		launchr.Term().Info().Println("Starting CI build")
+	// Commit unversioned changes if any
+	err := commitChangesIfAny()
+	if err != nil {
+		log.Fatalf("error: %v", err)
+	}
 
-		gitlabDomain := "https://projects.skilld.cloud"
-		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
-		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
-		if err != nil {
-			return err
+	// Execute bump
+	if !options.skipBump {
+		bumpArgs := []string{"bump"}
+		if options.last {
+			bumpArgs = append(bumpArgs, "--last")
 		}
-		launchr.Term().Printfln("URL: %s", ci.URL)
-		launchr.Term().Printfln("Username: %s", ci.Username)
-
-		username := ci.Username
-		password := ci.Password
-
-		comparisonRef := ""
-		if options.override != "" {
-			comparisonRef = options.override
-			launchr.Term().Printfln("Comparison artifact override: %s", comparisonRef)
+		bumpArgs = append(bumpArgs, commonArgs...)
+		bumpCmd := p.createCommand(options.bin, bumpArgs...)
+		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
+		bumpErr := bumpCmd.Run()
+		if bumpErr != nil {
+			return handleCmdErr(bumpErr, "bump error")
 		}
-
-		// Get OAuth token
-		accessToken, err := getOAuthToken(gitlabDomain, username, password)
-		if err != nil {
-			return fmt.Errorf("failed to get OAuth token: %w", err)
-		}
-
-		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api reuuest)
-		if save {
-			err = p.k.Save()
-			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
-			if err != nil {
-				launchr.Log().Error("error during saving keyring file", "error", err)
-			}
-		}
-
-		// Get branch name
-		branchName, err := getBranchName()
-		if err != nil {
-			return fmt.Errorf("failed to get branch name: %w", err)
-		}
-
-		// Get repo name
-		repoName, err := getRepoName()
-		if err != nil {
-			return fmt.Errorf("failed to get repo name: %w", err)
-		}
-
-		// Get project ID
-		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
-		if err != nil {
-			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
-		}
-
-		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef)
-		if err != nil {
-			return fmt.Errorf("failed to trigger pipeline: %w", err)
-		}
-
-		// Get all jobs in the pipeline
-		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
-		if err != nil {
-			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
-		}
-
-		// Find the target job ID
-		var targetJobID int
-		for _, job := range jobs {
-			if job.Name == targetJobName {
-				targetJobID = job.ID
-				break
-			}
-		}
-		if targetJobID == 0 {
-			return fmt.Errorf("no %s job found in pipeline", targetJobName)
-		}
-
-		// Trigger the manual job
-		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
-		if err != nil {
-			return fmt.Errorf("failed to trigger manual job: %w", err)
-		}
-
 	} else {
+		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
+	}
+	launchr.Term().Printf("\n")
+
+	if options.local {
 		launchr.Term().Info().Println("Starting local build")
 
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
@@ -232,48 +206,27 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 		launchr.Term().Println("Checking keyring...")
 		keyringEntryName := "Artifacts repository"
-		err := validateCredentials(artifactsRepositoryDomain, plasmaBinary, p.k, keyringEntryName)
+		err := validateCredentials(artifactsRepositoryDomain, options.bin, p.k, keyringEntryName)
 		if err != nil {
 			return err
 		}
 
 		// Appending --keyring-passphrase to commands
-		keyringCmd := func(command string, args ...string) *exec.Cmd {
+		keyringCmd := func(cmd *exec.Cmd) *exec.Cmd {
 			if options.keyringPassphrase != "" {
-				args = append(args, "--keyring-passphrase", options.keyringPassphrase)
+				cmd.Args = append(cmd.Args, "--keyring-passphrase", options.keyringPassphrase)
 			}
-
-			return exec.Command(command, args...)
+			return cmd
 		}
 
 		// Commands executed sequentially
-
-		if !options.skipBump {
-			bumpArgs := []string{"bump"}
-			if options.last {
-				bumpArgs = append(bumpArgs, "--last")
-			}
-			bumpArgs = append(bumpArgs, commonArgs...)
-			bumpCmd := exec.Command(plasmaBinary, bumpArgs...) //nolint G204
-			bumpCmd.Stdout = streams.Out()
-			bumpCmd.Stderr = streams.Err()
-			bumpCmd.Stdin = streams.In()
-			launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-			_ = bumpCmd.Run() //nolint
-			launchr.Term().Println()
-		} else {
-			launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
-		}
 
 		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
 		}
 		composeArgs = append(composeArgs, commonArgs...)
-		composeCmd := keyringCmd(plasmaBinary, composeArgs...)
-		composeCmd.Stdout = streams.Out()
-		composeCmd.Stderr = streams.Err()
-		composeCmd.Stdin = streams.In()
+		composeCmd := keyringCmd(p.createCommand(options.bin, composeArgs...))
 		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
 		composeErr := composeCmd.Run()
 		if composeErr != nil {
@@ -286,10 +239,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
 		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-		syncCmd := keyringCmd(plasmaBinary, bumpSyncArgs...)
-		syncCmd.Stdout = streams.Out()
-		syncCmd.Stderr = streams.Err()
-		syncCmd.Stdin = streams.In()
+		syncCmd := keyringCmd(p.createCommand(options.bin, bumpSyncArgs...))
 		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
 		syncErr := syncCmd.Run()
 		if syncErr != nil {
@@ -311,12 +261,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
-			packageCmdArgs := []string{"package"}
-			packageCmdArgs = append(packageCmdArgs, commonArgs...)
-			packageCmd := exec.Command(plasmaBinary, packageCmdArgs...) //nolint G204
+			packageCmdArgs := append([]string{"package"}, commonArgs...)
+			packageCmd := p.createCommand(options.bin, packageCmdArgs...)
 			packageCmd.Stdout = &packageStdOut
 			packageCmd.Stderr = &packageStdErr
-			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			packageCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
 			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
 			packageErr = packageCmd.Run()
 			if packageErr != nil {
@@ -324,12 +273,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 				return
 			}
 
-			publishCmdArgs := []string{"publish"}
-			publishCmdArgs = append(publishCmdArgs, commonArgs...)
-			publishCmd := keyringCmd(plasmaBinary, publishCmdArgs...)
+			publishCmdArgs := append([]string{"publish"}, commonArgs...)
+			publishCmd := keyringCmd(p.createCommand(options.bin, publishCmdArgs...))
 			publishCmd.Stdout = &publishStdOut
 			publishCmd.Stderr = &publishStdErr
-			// publishCmd.Stdin = os.Stdin // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
+			publishCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
 			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
 			publishErr = publishCmd.Run()
 			if publishErr != nil {
@@ -345,14 +293,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			deployCmdArgs := []string{"platform:deploy"}
 			deployCmdArgs = append(deployCmdArgs, environment)
 			deployCmdArgs = append(deployCmdArgs, tags)
-			if verbosity != "" {
+			if options.debug {
 				deployCmdArgs = append(deployCmdArgs, "--debug")
 			}
 
-			deployCmd := keyringCmd(plasmaBinary, deployCmdArgs...)
-			deployCmd.Stdout = streams.Out()
-			deployCmd.Stderr = streams.Err()
-			deployCmd.Stdin = streams.In()
+			deployCmd := keyringCmd(p.createCommand(options.bin, deployCmdArgs...))
 			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
 			deployErr = deployCmd.Run()
 			if deployErr != nil {
@@ -385,6 +330,94 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		errJoin := errors.Join(packageErr, publishErr, deployErr)
 		if errJoin != nil {
 			return errJoin
+		}
+
+	} else {
+		launchr.Term().Info().Println("Starting CI build (now default behavior)")
+
+		// Push un-pushed commits if any
+		if err := pushBranchIfNotRemote(); err != nil {
+			return fmt.Errorf("Error: %w", err)
+		}
+
+		// Push un-pushed commits if any
+		if err := pushCommitsIfAny(); err != nil {
+			return fmt.Errorf("Error: %w", err)
+		}
+
+		gitlabDomain := "https://projects.skilld.cloud"
+		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
+		if err != nil {
+			return err
+		}
+		launchr.Term().Printfln("URL: %s", ci.URL)
+		launchr.Term().Printfln("Username: %s", ci.Username)
+
+		username := ci.Username
+		password := ci.Password
+
+		// Get OAuth token
+		accessToken, err := getOAuthToken(gitlabDomain, username, password)
+		if err != nil {
+			return fmt.Errorf("failed to get OAuth token: %w", err)
+		}
+
+		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api request)
+		if save {
+			err = p.k.Save()
+			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
+			if err != nil {
+				launchr.Log().Error("error during saving keyring file", "error", err)
+			}
+		}
+
+		// Get branch name
+		branchName, err := getBranchName()
+		if err != nil {
+			return fmt.Errorf("failed to get branch name: %w", err)
+		}
+
+		// Get repo name
+		repoName, err := getRepoName()
+		if err != nil {
+			return fmt.Errorf("failed to get repo name: %w", err)
+		}
+
+		// Get project ID
+		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
+		if err != nil {
+			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
+		}
+
+		// Trigger pipeline
+		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef, verbosity, ansibleDebug)
+		if err != nil {
+			return fmt.Errorf("failed to trigger pipeline: %w", err)
+		}
+
+		// Get all jobs in the pipeline
+		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
+		}
+
+		// Find the target job ID
+		var targetJobID int
+		for _, job := range jobs {
+			if job.Name == targetJobName {
+				targetJobID = job.ID
+				break
+			}
+		}
+		if targetJobID == 0 {
+			return fmt.Errorf("no %s job found in pipeline", targetJobName)
+		}
+
+		// Trigger the manual job
+		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
+		if err != nil {
+			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
 
 	}
