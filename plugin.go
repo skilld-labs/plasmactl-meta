@@ -44,16 +44,17 @@ func (p *Plugin) OnAppInit(app launchr.App) error {
 }
 
 type metaOptions struct {
-	bin               string
-	verboseCount      int
-	keyringPassphrase string
-	override          string
-	last              bool
-	skipBump          bool
-	ci                bool
-	local             bool
-	clean             bool
-	debug             bool
+	bin                string
+	verboseCount       int
+	keyringPassphrase  string
+	override           string
+	last               bool
+	skipBump           bool
+	ci                 bool
+	local              bool
+	clean              bool
+	debug              bool
+	conflictsVerbosity bool
 }
 
 // CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
@@ -94,6 +95,7 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
 	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
 	metaCmd.Flags().BoolVar(&options.debug, "debug", false, "Run Ansible in debug mode")
+	metaCmd.Flags().BoolVar(&options.conflictsVerbosity, "conflicts-verbosity", false, "Log files conflicts during composition")
 
 	rootCmd.AddCommand(metaCmd)
 	return nil
@@ -221,9 +223,12 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Commands executed sequentially
 
-		composeArgs := []string{"compose", "--skip-not-versioned", "--conflicts-verbosity"}
+		composeArgs := []string{"compose", "--skip-not-versioned"}
 		if options.clean {
 			composeArgs = append(composeArgs, "--clean")
+		}
+		if options.conflictsVerbosity {
+			composeArgs = append(composeArgs, "--conflicts-verbosity")
 		}
 		composeArgs = append(composeArgs, commonArgs...)
 		composeCmd := keyringCmd(p.createCommand(options.bin, composeArgs...))
