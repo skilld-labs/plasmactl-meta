@@ -139,7 +139,7 @@ func getProjectID(gitlabDomain, username, password, accessToken, repoName string
 	return fmt.Sprintf("%.0f", projects[0]["id"].(float64)), nil
 }
 
-func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources, verbosity string, ansibleDebug bool) (int, error) {
+func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources string, ansibleDebug bool) (int, error) {
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipeline?access_token=%s", gitlabDomain, projectID, accessToken)
 	launchr.Log().Debug("GitLab API URL for triggering pipeline", "url", apiURL)
 
@@ -167,7 +167,10 @@ func triggerPipeline(gitlabDomain, username, password, accessToken, projectID, b
 		})
 	}
 	// Only add VERBOSITY if provided
-	if verbosity != "" {
+	logLvl := launchr.Log().Level()
+	if logLvl != launchr.LogLevelDisabled {
+		logLvl := int(logLvl) - 1
+		verbosity := "-" + strings.Repeat("v", int(launchr.LogLevelError)-logLvl)
 		launchr.Log().Info("Appending VERBOSITY to pipelines variables")
 		data["variables"] = append(data["variables"].([]map[string]string), map[string]string{
 			"key":   "VERBOSITY",
