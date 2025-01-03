@@ -47,7 +47,6 @@ type metaOptions struct {
 	bin                string
 	verboseCount       int
 	keyringPassphrase  string
-	override           string
 	last               bool
 	skipBump           bool
 	ci                 bool
@@ -88,7 +87,6 @@ func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
 		},
 	}
 	metaCmd.SetArgs([]string{"environment", "tags"}) // TODO: Deprecate tags usage, default to all
-	metaCmd.Flags().StringVar(&options.override, "override", "", "Bump --sync override option")
 	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
 	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
 	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
@@ -157,11 +155,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		verbosity = "-" + strings.Repeat("v", options.verboseCount)
 		commonArgs = append(commonArgs, verbosity)
 		launchr.Log().Debug("verbosity level", "level", verbosity)
-	}
-
-	comparisonRef := options.override
-	if comparisonRef != "" {
-		launchr.Term().Info().Printfln("Comparison artifact override: %s", comparisonRef)
 	}
 
 	ansibleDebug := options.debug
@@ -240,9 +233,6 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		launchr.Term().Println()
 		bumpSyncArgs := []string{"bump", "--sync"}
-		if options.override != "" {
-			bumpSyncArgs = append(bumpSyncArgs, "--override", options.override)
-		}
 		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
 		syncCmd := keyringCmd(p.createCommand(options.bin, bumpSyncArgs...))
 		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
@@ -396,7 +386,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 
 		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, comparisonRef, verbosity, ansibleDebug)
+		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, verbosity, ansibleDebug)
 		if err != nil {
 			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}
