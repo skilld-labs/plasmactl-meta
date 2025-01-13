@@ -77,7 +77,7 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 			local:              input.Opt("local").(bool),
 			clean:              input.Opt("clean").(bool),
 			debug:              input.Opt("debug").(bool),
-			conflictsVerbosity: input.Opt("conflict-verbosity").(bool),
+			conflictsVerbosity: input.Opt("conflicts-verbosity").(bool),
 		}
 
 		return p.meta(ctx, env, tags, options)
