@@ -24,7 +24,7 @@ action:
       default: false
     - name: ci
       title: CI
-      description: Execute all commands and deploy in CI
+      description: Execute all commands and deploy in CI (default)
       type: boolean
       default: false
     - name: local
@@ -34,7 +34,7 @@ action:
       default: false
     - name: clean
       title: Clean
-      description: Clean flag for local compose command
+      description: Clean flag for compose command (only works with --local)
       type: boolean
       default: false
     - name: debug
