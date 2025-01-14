@@ -46,6 +46,7 @@ func (p *Plugin) PluginInfo() launchr.PluginInfo {
 // OnAppInit implements launchr.Plugin interface.
 func (p *Plugin) OnAppInit(app launchr.App) error {
 	app.GetService(&p.k)
+	app.GetService(&p.m)
 	p.app = app
 	return nil
 }
