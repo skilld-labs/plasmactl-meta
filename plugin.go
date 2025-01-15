@@ -87,6 +87,14 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 }
 
 func (p *Plugin) meta(ctx context.Context, environment, tags string, options metaOptions) error {
+
+	logLvl := launchr.Log().Level()
+	println("logLvl")
+	fmt.Println(logLvl)
+	println("LogLevelDisabled")
+	fmt.Println(launchr.LogLevelDisabled)
+	println("XXXXXXXXXXXXX")
+
 	if options.ci {
 		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
 	}
@@ -149,7 +157,8 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 
 		launchr.Term().Println()
 		err = p.executeAction(ctx, "bump", nil, action.InputParams{
-			"sync": true,
+			"sync":          true,
+			"show-progress": true,
 		})
 		if err != nil {
 			return fmt.Errorf("sync error: %w", err)
