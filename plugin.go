@@ -2,30 +2,37 @@
 package plasmactlmeta
 
 import (
-	"bytes"
+	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
-	"strings"
 	"sync"
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
-	"github.com/spf13/cobra"
+	"github.com/launchrctl/launchr/pkg/action"
 )
+
+//go:embed action.yaml
+var actionYaml []byte
 
 func init() {
 	launchr.RegisterPlugin(&Plugin{})
 }
 
-var tplAddCredentials = "execute '%s login --url=%s' to add credentials to keyring" //nolint G101
+const (
+	tplAddCredentials  = "execute '%s keyring:login --url=%s' to add credentials to keyring" //nolint:gosec
+	gitlabDomain       = "https://projects.skilld.cloud"
+	repoDomain         = "https://repositories.skilld.cloud"
+	internalRepoDomain = "http://repositories.interaction.svc.skilld:8081"
+)
 
 // Plugin is launchr plugin providing meta action.
 type Plugin struct {
 	k   keyring.Keyring
+	m   action.Manager
 	app launchr.App
 }
 
@@ -39,14 +46,13 @@ func (p *Plugin) PluginInfo() launchr.PluginInfo {
 // OnAppInit implements launchr.Plugin interface.
 func (p *Plugin) OnAppInit(app launchr.App) error {
 	app.GetService(&p.k)
+	app.GetService(&p.m)
 	p.app = app
 	return nil
 }
 
 type metaOptions struct {
 	bin                string
-	verboseCount       int
-	keyringPassphrase  string
 	last               bool
 	skipBump           bool
 	ci                 bool
@@ -56,106 +62,36 @@ type metaOptions struct {
 	conflictsVerbosity bool
 }
 
-// CobraAddCommands implements launchr.CobraPlugin interface to provide meta functionality.
-func (p *Plugin) CobraAddCommands(rootCmd *launchr.Command) error {
-	options := metaOptions{
-		// Retrieve current bin name from args to use in consequent commands.
-		bin: os.Args[0],
-	}
-
-	metaCmd := &launchr.Command{
-		Use:     "meta [flags] environment tags",
-		Short:   "Push code + bump and deploy in CI (compose + sync + package + publish + deploy)",
-		Aliases: []string{"deliver"},
-		Args:    cobra.MatchAll(cobra.ExactArgs(2), cobra.OnlyValidArgs),
-		RunE: func(cmd *launchr.Command, args []string) error {
-			// Don't show usage help on a runtime error.
-			cmd.SilenceUsage = true
-
-			err := ensureKeyringPassphraseSet(cmd, &options)
-			if err != nil {
-				return err
-			}
-
-			verboseCount, err := cmd.Flags().GetCount("verbose")
-			if err != nil {
-				return err
-			}
-			options.verboseCount = verboseCount
-
-			return p.meta(args[0], args[1], options)
-		},
-	}
-	metaCmd.SetArgs([]string{"environment", "tags"}) // TODO: Deprecate tags usage, default to all
-	metaCmd.Flags().BoolVar(&options.last, "last", false, "Last flag for local bump command")
-	metaCmd.Flags().BoolVar(&options.skipBump, "skip-bump", false, "Skip execution of bump command")
-	metaCmd.Flags().BoolVar(&options.ci, "ci", false, "Deprecated option (now default bebavior)")
-	metaCmd.Flags().BoolVar(&options.local, "local", false, "Execute compose + sync + package + publish + deploy locally instead of using CI")
-	metaCmd.Flags().BoolVar(&options.clean, "clean", false, "Clean flag for local compose command (only with --local)")
-	metaCmd.Flags().BoolVar(&options.debug, "debug", false, "Run Ansible in debug mode")
-	metaCmd.Flags().BoolVar(&options.conflictsVerbosity, "conflicts-verbosity", false, "Log files conflicts during composition")
-
-	rootCmd.AddCommand(metaCmd)
-	return nil
-}
-
-func ensureKeyringPassphraseSet(cmd *launchr.Command, options *metaOptions) error {
-	keyringPassphrase, err := cmd.Flags().GetString("keyring-passphrase")
-	if err != nil {
-		return fmt.Errorf("error while getting keyring-passphrase option value: %w", err)
-	}
-
-	if keyringPassphrase == "" {
-		askPass := keyring.AskPassWithTerminal{}
-		var passphrase string
-		var errGet error
-
-		passphrase, errGet = askPass.GetPass()
-		if errGet != nil {
-			return errGet
+// DiscoverActions implements [launchr.ActionDiscoveryPlugin] interface.
+func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
+	a := action.NewFromYAML("meta", actionYaml)
+	a.SetRuntime(action.NewFnRuntime(func(ctx context.Context, a *action.Action) error {
+		input := a.Input()
+		env := input.Arg("environment").(string)
+		tags := input.Arg("tags").(string)
+		v := launchr.Version()
+		options := metaOptions{
+			bin:                v.Name,
+			last:               input.Opt("last").(bool),
+			skipBump:           input.Opt("skip-bump").(bool),
+			ci:                 input.Opt("ci").(bool),
+			local:              input.Opt("local").(bool),
+			clean:              input.Opt("clean").(bool),
+			debug:              input.Opt("debug").(bool),
+			conflictsVerbosity: input.Opt("conflicts-verbosity").(bool),
 		}
 
-		keyringPassphrase = passphrase
-		err = cmd.Flags().Set("keyring-passphrase", keyringPassphrase)
-		if err != nil {
-			return err
-		}
-	}
-
-	options.keyringPassphrase = keyringPassphrase
-
-	return nil
+		return p.meta(ctx, env, tags, options)
+	}))
+	return []*action.Action{a}, nil
 }
 
-func (p *Plugin) createCommand(command string, args ...string) *exec.Cmd {
-	streams := p.app.Streams()
-	cmd := exec.Command(command, args...)
-	cmd.Stdout = streams.Out()
-	cmd.Stderr = streams.Err()
-	// Set directly because it's a file. Exec command has special treatment for [*os.File] input.
-	cmd.Stdin = os.Stdin
-	return cmd
-}
-
-func (p *Plugin) meta(environment, tags string, options metaOptions) error {
+func (p *Plugin) meta(ctx context.Context, environment, tags string, options metaOptions) error {
 	if options.ci {
 		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
 	}
 
 	launchr.Log().Info("arguments", "environment", environment, "tags", tags)
-
-	var commonArgs []string
-	verbosity := ""
-	if options.verboseCount > 0 {
-		// TODO: Remove once 'verboseCount, err := cmd.Flags().GetCount("verbose")"' is fixed
-		if options.verboseCount > 4 {
-			options.verboseCount /= 2
-		}
-		// Repeat 'v' as many times as in options.verboseCount
-		verbosity = "-" + strings.Repeat("v", options.verboseCount)
-		commonArgs = append(commonArgs, verbosity)
-		launchr.Log().Debug("verbosity level", "level", verbosity)
-	}
 
 	ansibleDebug := options.debug
 	if ansibleDebug {
@@ -173,16 +109,11 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 	// Execute bump
 	if !options.skipBump {
-		bumpArgs := []string{"bump"}
-		if options.last {
-			bumpArgs = append(bumpArgs, "--last")
-		}
-		bumpArgs = append(bumpArgs, commonArgs...)
-		bumpCmd := p.createCommand(options.bin, bumpArgs...)
-		launchr.Term().Println(sanitizeString(bumpCmd.String(), options.keyringPassphrase))
-		bumpErr := bumpCmd.Run()
-		if bumpErr != nil {
-			return handleCmdErr(bumpErr, "bump error")
+		err = p.executeAction(ctx, "bump", nil, action.InputParams{
+			"last": options.last,
+		})
+		if err != nil {
+			return fmt.Errorf("bump error: %w", err)
 		}
 	} else {
 		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
@@ -194,10 +125,10 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Check if provided keyring pw is correct, since it will be used for multiple commands
 		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
-		artifactsRepositoryDomain := "https://repositories.skilld.cloud"
+		artifactsRepositoryDomain := repoDomain
 		var accessibilityCode int
-		if isURLAccessible("http://repositories.interaction.svc.skilld:8081", &accessibilityCode) {
-			artifactsRepositoryDomain = "http://repositories.interaction.svc.skilld:8081"
+		if isURLAccessible(internalRepoDomain, &accessibilityCode) {
+			artifactsRepositoryDomain = internalRepoDomain
 		}
 		launchr.Term().Println("Checking keyring...")
 		keyringEntryName := "Artifacts repository"
@@ -206,49 +137,26 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			return err
 		}
 
-		// Appending --keyring-passphrase to commands
-		keyringCmd := func(cmd *exec.Cmd) *exec.Cmd {
-			if options.keyringPassphrase != "" {
-				cmd.Args = append(cmd.Args, "--keyring-passphrase", options.keyringPassphrase)
-			}
-			return cmd
-		}
-
 		// Commands executed sequentially
-
-		composeArgs := []string{"compose", "--skip-not-versioned"}
-		if options.clean {
-			composeArgs = append(composeArgs, "--clean")
-		}
-		if options.conflictsVerbosity {
-			composeArgs = append(composeArgs, "--conflicts-verbosity")
-		}
-		composeArgs = append(composeArgs, commonArgs...)
-		composeCmd := keyringCmd(p.createCommand(options.bin, composeArgs...))
-		launchr.Term().Println(sanitizeString(composeCmd.String(), options.keyringPassphrase))
-		composeErr := composeCmd.Run()
-		if composeErr != nil {
-			return handleCmdErr(composeErr, "compose error")
+		err = p.executeAction(ctx, "compose", nil, action.InputParams{
+			"skip-not-versioned":  true,
+			"conflicts-verbosity": options.conflictsVerbosity,
+			"clean":               options.clean,
+		})
+		if err != nil {
+			return fmt.Errorf("compose error: %w", err)
 		}
 
 		launchr.Term().Println()
-		bumpSyncArgs := []string{"bump", "--sync"}
-		bumpSyncArgs = append(bumpSyncArgs, commonArgs...)
-		syncCmd := keyringCmd(p.createCommand(options.bin, bumpSyncArgs...))
-		launchr.Term().Println(sanitizeString(syncCmd.String(), options.keyringPassphrase))
-		syncErr := syncCmd.Run()
-		if syncErr != nil {
-			return handleCmdErr(syncErr, "sync error")
+		err = p.executeAction(ctx, "bump", nil, action.InputParams{
+			"sync": true,
+		})
+		if err != nil {
+			return fmt.Errorf("sync error: %w", err)
 		}
 
 		// Commands executed in parallel
-
-		var packageStdOut bytes.Buffer
-		var packageStdErr bytes.Buffer
 		var packageErr error
-
-		var publishStdOut bytes.Buffer
-		var publishStdErr bytes.Buffer
 		var publishErr error
 
 		launchr.Term().Println()
@@ -256,27 +164,13 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
-			packageCmdArgs := append([]string{"package"}, commonArgs...)
-			packageCmd := p.createCommand(options.bin, packageCmdArgs...)
-			packageCmd.Stdout = &packageStdOut
-			packageCmd.Stderr = &packageStdErr
-			packageCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-			// cli.Println(sanitizeString(packageCmd.String(), options.keyringPassphrase)) // TODO: Find a way to prevent it to fill deploy stdin
-			packageErr = packageCmd.Run()
+			packageErr = p.executeAction(ctx, "package", nil, nil)
 			if packageErr != nil {
-				publishErr = handleCmdErr(packageErr, "package error")
 				return
 			}
 
-			publishCmdArgs := append([]string{"publish"}, commonArgs...)
-			publishCmd := keyringCmd(p.createCommand(options.bin, publishCmdArgs...))
-			publishCmd.Stdout = &publishStdOut
-			publishCmd.Stderr = &publishStdErr
-			publishCmd.Stdin = nil // Any interaction will prevent waitgroup to finish and thus stuck before print of stdout
-			// cli.Println(sanitizeString(publishCmd.String(), keyringPassphrase)) // TODO: Debug why it appears during deploy command stdout
-			publishErr = publishCmd.Run()
+			publishErr = p.executeAction(ctx, "publish", nil, nil)
 			if publishErr != nil {
-				publishErr = handleCmdErr(publishErr, "publish error")
 				return
 			}
 		}(wg)
@@ -285,41 +179,20 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
 			defer wg.Done()
-			deployCmdArgs := []string{"platform:deploy"}
-			deployCmdArgs = append(deployCmdArgs, environment)
-			deployCmdArgs = append(deployCmdArgs, tags)
-			if options.debug {
-				deployCmdArgs = append(deployCmdArgs, "--debug")
-			}
-
-			deployCmd := keyringCmd(p.createCommand(options.bin, deployCmdArgs...))
-			launchr.Term().Println(sanitizeString(deployCmd.String(), options.keyringPassphrase))
-			deployErr = deployCmd.Run()
+			deployErr = p.executeAction(ctx, "platform:deploy",
+				action.InputParams{
+					"environment": environment,
+					"tags":        tags,
+				},
+				action.InputParams{
+					"debug": options.debug,
+				},
+			)
 			if deployErr != nil {
-				deployErr = handleCmdErr(deployErr, "deploy error")
 				return
 			}
 		}(wg)
 		wg.Wait()
-
-		if packageStdOut.Len() > 0 {
-			launchr.Term().Println()
-			launchr.Term().Println("package stdout:")
-			launchr.Term().Println(packageStdOut.String())
-		}
-		if packageStdErr.Len() > 0 {
-			launchr.Term().Println("package stderr:")
-			launchr.Term().Println(packageStdErr.String())
-		}
-		if publishStdOut.Len() > 0 {
-			launchr.Term().Println()
-			launchr.Term().Println("publish stdout:")
-			launchr.Term().Println(publishStdOut.String())
-		}
-		if publishStdErr.Len() > 0 {
-			launchr.Term().Println("publish stderr:")
-			launchr.Term().Println(publishStdErr.String())
-		}
 
 		// Return all error messages, the first error code will be used as a result.
 		errJoin := errors.Join(packageErr, publishErr, deployErr)
@@ -332,15 +205,14 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 
 		// Push un-pushed commits if any
 		if err := pushBranchIfNotRemote(); err != nil {
-			return fmt.Errorf("Error: %w", err)
+			return err
 		}
 
 		// Push un-pushed commits if any
 		if err := pushCommitsIfAny(); err != nil {
-			return fmt.Errorf("Error: %w", err)
+			return err
 		}
 
-		gitlabDomain := "https://projects.skilld.cloud"
 		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
 		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
 		if err != nil {
@@ -349,8 +221,8 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		launchr.Term().Printfln("URL: %s", ci.URL)
 		launchr.Term().Printfln("Username: %s", ci.Username)
 
-		username := ci.Username
-		password := ci.Password
+		username = ci.Username
+		password = ci.Password
 
 		// Get OAuth token
 		accessToken, err := getOAuthToken(gitlabDomain, username, password)
@@ -358,7 +230,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 			return fmt.Errorf("failed to get OAuth token: %w", err)
 		}
 
-		// Save gitlab credentials to keyiring once we are sure that they are correct (after 1st successful api request)
+		// Save gitlab credentials to keyring once we are sure that they are correct (after 1st successful api request)
 		if save {
 			err = p.k.Save()
 			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
@@ -386,7 +258,7 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		}
 
 		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, verbosity, ansibleDebug)
+		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, ansibleDebug)
 		if err != nil {
 			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}
@@ -414,18 +286,24 @@ func (p *Plugin) meta(environment, tags string, options metaOptions) error {
 		if err != nil {
 			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
-
 	}
 	return nil
 }
 
-func handleCmdErr(cmdErr error, msg string) error {
-	var exitErr *exec.ExitError
-	if errors.As(cmdErr, &exitErr) {
-		return launchr.NewExitError(exitErr.ExitCode(), msg)
+func (p *Plugin) executeAction(ctx context.Context, id string, args action.InputParams, opts action.InputParams) error {
+	a, ok := p.m.Get(id)
+	if !ok {
+		return fmt.Errorf("action %q was not found", id)
 	}
-
-	return cmdErr
+	err := a.SetInput(action.NewInput(a, args, opts, p.app.Streams()))
+	if err != nil {
+		return fmt.Errorf("failed to set input for action %q: %w", id, err)
+	}
+	err = a.Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("error executing action %q: %w", id, err)
+	}
+	return nil
 }
 
 func validateCredentials(url, plasmaBinary string, k keyring.Keyring, keyringEntryName string) error {
@@ -502,12 +380,4 @@ func isURLAccessible(url string, code *int) bool {
 	defer resp.Body.Close()
 	*code = resp.StatusCode
 	return resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
-}
-
-func sanitizeString(command string, passphrase string) string {
-	if passphrase != "" {
-		return strings.ReplaceAll(command, passphrase, "[masked]")
-	}
-
-	return command
 }
