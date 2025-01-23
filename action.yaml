@@ -27,6 +27,10 @@ action:
       description: Execute all commands and deploy in CI (default)
       type: boolean
       default: false
+      process:
+        - processor: launchr.GetConfigValue
+          options:
+            path: meta.ci
     - name: local
       title: Local
       description: Execute compose + sync + package + publish + deploy locally instead of using CI
