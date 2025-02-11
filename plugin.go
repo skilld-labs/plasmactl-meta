@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
 	"github.com/launchrctl/launchr/pkg/action"
@@ -232,14 +233,14 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 
 		var accessToken string
 		launchr.Term().Info().Printfln("Getting Gitlab Personal Access Token for %s from keyring", gitlabDomain)
-		ci, save, err := getPersonalAccessToken(p.k)
+		kvi, save, err := getPersonalAccessToken(p.k)
 		if err != nil {
 			return err
 		}
-		launchr.Term().Printfln("URL: %s", ci.URL)
-		launchr.Term().Printfln("Username: %s", ci.Username)
+		launchr.Term().Printfln("PAT key: %s", kvi.Key)
+		launchr.Term().Printfln("PAT value: %s", kvi.Value)
 
-		accessToken = ci.PersonalAccessToken
+		accessToken = kvi.Value
 
 		// Save gitlab credentials to keyring once we are sure that they are correct (after 1st successful api request)
 		if save {
@@ -378,36 +379,55 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 }
 
 func getPersonalAccessToken(k keyring.Keyring) (keyring.KeyValueItem, bool, error) {
-	personalAccessToken := "gitlabPersonalAccessToken"
-	ci, err := k.GetForKey(personalAccessToken)
+	println("1")
+	personalAccessTokenKey := "gitlabPersonalAccessToken"
+	println("2")
+	kvi, err := k.GetForKey(personalAccessTokenKey)
+	println("3")
 	save := false
+	println("4")
 	if err != nil {
+		println("5")
 		if errors.Is(err, keyring.ErrEmptyPass) {
-			return ci, false, err
+			println("6")
+			return kvi, false, err
 		} else if !errors.Is(err, keyring.ErrNotFound) {
+			println("7")
 			launchr.Log().Error("error", "error", err)
-			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
+			return kvi, false, errors.New("the keyring is malformed or wrong passphrase provided")
 		}
-		ci = keyring.KeyValueItem{}
-		ci.Key = personalAccessToken
-		//ci.Value = personalAccessToken
-		if ci.Key == "" {
+		spew.Println(err)
+		println("8")
+		kvi = keyring.KeyValueItem{}
+		println("9")
+		kvi.Key = personalAccessTokenKey
+		println("10")
+		//kvi.Value = personalAccessToken
+		if kvi.Value == "" {
+			println("11")
 			launchr.Term().Info().Printfln("Please add personal access tokens for user XXX and URL - %s")
-			err = keyring.RequestKeyValueFromTty(&ci)
+			println("12")
+			err = keyring.RequestKeyValueFromTty(&kvi)
+			println("13")
 			if err != nil {
-				return ci, false, err
+				println("14")
+				return kvi, false, err
 			}
+			println("15")
 		}
 
-		err = k.AddItem(ci)
+		println("16")
+		err = k.AddItem(kvi)
 		if err != nil {
-			return ci, false, err
+			return kvi, false, err
 		}
+		println("17")
 
 		save = true
 	}
 
-	return ci, save, nil
+	println("18")
+	return kvi, save, nil
 }
 
 func isURLAccessible(url string, code *int) bool {
