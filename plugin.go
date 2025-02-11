@@ -213,7 +213,7 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 			return err
 		}
 
-		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		launchr.Term().Info().Printfln("Getting user credentials for %s from keyring", gitlabDomain)
 		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
 		if err != nil {
 			return err
@@ -225,10 +225,21 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 		password = ci.Password
 
 		// Get OAuth token
-		accessToken, err := getOAuthToken(gitlabDomain, username, password)
+		//accessToken, err := getOAuthToken(gitlabDomain, username, password)
+		//if err != nil {
+		//return fmt.Errorf("failed to get OAuth token: %w", err)
+		//}
+
+		var accessToken string
+		launchr.Term().Info().Printfln("Getting Gitlab Personal Access Token for %s from keyring", gitlabDomain)
+		ci, save, err := getPersonalAccessToken(p.k)
 		if err != nil {
-			return fmt.Errorf("failed to get OAuth token: %w", err)
+			return err
 		}
+		launchr.Term().Printfln("URL: %s", ci.URL)
+		launchr.Term().Printfln("Username: %s", ci.Username)
+
+		accessToken = ci.PersonalAccessToken
 
 		// Save gitlab credentials to keyring once we are sure that they are correct (after 1st successful api request)
 		if save {
@@ -350,6 +361,39 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 				launchr.Term().Info().Printfln("Please add login and password for URL - %s", ci.URL)
 			}
 			err = keyring.RequestCredentialsFromTty(&ci)
+			if err != nil {
+				return ci, false, err
+			}
+		}
+
+		err = k.AddItem(ci)
+		if err != nil {
+			return ci, false, err
+		}
+
+		save = true
+	}
+
+	return ci, save, nil
+}
+
+func getPersonalAccessToken(k keyring.Keyring) (keyring.KeyValueItem, bool, error) {
+	personalAccessToken := "gitlabPersonalAccessToken"
+	ci, err := k.GetForKey(personalAccessToken)
+	save := false
+	if err != nil {
+		if errors.Is(err, keyring.ErrEmptyPass) {
+			return ci, false, err
+		} else if !errors.Is(err, keyring.ErrNotFound) {
+			launchr.Log().Error("error", "error", err)
+			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
+		}
+		ci = keyring.KeyValueItem{}
+		ci.Key = personalAccessToken
+		//ci.Value = personalAccessToken
+		if ci.Key == "" {
+			launchr.Term().Info().Printfln("Please add personal access tokens for user XXX and URL - %s")
+			err = keyring.RequestKeyValueFromTty(&ci)
 			if err != nil {
 				return ci, false, err
 			}
