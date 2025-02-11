@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -72,9 +73,27 @@ func getOAuthToken(gitlabDomain, username, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	launchr.Log().Debug("OAuth token response", "body", string(body))
 
-	// Parse JSON response to extract access token
+	// Check the HTTP status code.
+	if resp.StatusCode != http.StatusOK {
+		// If not 200, check if the response appears to be HTML.
+		contentType := resp.Header.Get("Content-Type")
+		if !strings.Contains(contentType, "application/json") {
+			// Optionally, extract the <title> if it's an HTML page.
+			re := regexp.MustCompile(`(?i)<title>(.*?)</title>`)
+			matches := re.FindSubmatch(body)
+			if len(matches) > 1 {
+				title := string(matches[1])
+				return "", fmt.Errorf("unexpected HTTP status: %s, HTML title: %s", resp.Status, title)
+			}
+		}
+		// Return the error with status code and response body for diagnostics.
+		return "", fmt.Errorf("unexpected HTTP status: %s, body: %s", resp.Status, body)
+	}
+
+	// Parse JSON response to extract access token.
 	var oauthResp OAuthResponse
 	err = json.Unmarshal(body, &oauthResp)
 	if err != nil {
