@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
 
 	"github.com/launchrctl/keyring"
 	"github.com/launchrctl/launchr"
@@ -25,7 +24,6 @@ func init() {
 const (
 	tplAddCredentials  = "execute '%s keyring:login --url=%s' to add credentials to keyring" //nolint:gosec
 	gitlabDomain       = "https://projects.skilld.cloud"
-	repoDomain         = "https://repositories.skilld.cloud"
 	internalRepoDomain = "http://repositories.interaction.svc.skilld:8081"
 )
 
@@ -123,20 +121,6 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 	if options.local {
 		launchr.Term().Info().Println("Starting local build")
 
-		// Check if provided keyring pw is correct, since it will be used for multiple commands
-		// Check if publish command credentials are available in keyring and correct as stdin will not be available in goroutine
-		artifactsRepositoryDomain := repoDomain
-		var accessibilityCode int
-		if isURLAccessible(internalRepoDomain, &accessibilityCode) {
-			artifactsRepositoryDomain = internalRepoDomain
-		}
-		launchr.Term().Println("Checking keyring...")
-		keyringEntryName := "Artifacts repository"
-		err := validateCredentials(artifactsRepositoryDomain, options.bin, p.k, keyringEntryName)
-		if err != nil {
-			return err
-		}
-
 		// Commands executed sequentially
 		err = p.executeAction(ctx, "compose", nil, action.InputParams{
 			"skip-not-versioned":  true,
@@ -155,49 +139,16 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 			return fmt.Errorf("sync error: %w", err)
 		}
 
-		// Commands executed in parallel
-		var packageErr error
-		var publishErr error
-
-		launchr.Term().Println()
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		go func(wg *sync.WaitGroup) {
-			defer wg.Done()
-			packageErr = p.executeAction(ctx, "package", nil, nil)
-			if packageErr != nil {
-				return
-			}
-
-			publishErr = p.executeAction(ctx, "publish", nil, nil)
-			if publishErr != nil {
-				return
-			}
-		}(wg)
-
-		var deployErr error
-		wg.Add(1)
-		go func(wg *sync.WaitGroup) {
-			defer wg.Done()
-			deployErr = p.executeAction(ctx, "platform:deploy",
-				action.InputParams{
-					"environment": environment,
-					"tags":        tags,
-				},
-				action.InputParams{
-					"debug": options.debug,
-				},
-			)
-			if deployErr != nil {
-				return
-			}
-		}(wg)
-		wg.Wait()
-
-		// Return all error messages, the first error code will be used as a result.
-		errJoin := errors.Join(packageErr, publishErr, deployErr)
-		if errJoin != nil {
-			return errJoin
+		err = p.executeAction(ctx, "platform:deploy", action.InputParams{
+			"environment": environment,
+			"tags":        tags,
+		},
+			action.InputParams{
+				"debug": options.debug,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("deploy error: %w", err)
 		}
 
 	} else {
@@ -303,31 +254,6 @@ func (p *Plugin) executeAction(ctx context.Context, id string, args action.Input
 	if err != nil {
 		return fmt.Errorf("error executing action %q: %w", id, err)
 	}
-	return nil
-}
-
-func validateCredentials(url, plasmaBinary string, k keyring.Keyring, keyringEntryName string) error {
-	if !k.Exists() {
-		launchr.Term().Error().Println("Keyring doesn't exist")
-		return fmt.Errorf(tplAddCredentials, plasmaBinary, url)
-	}
-
-	ci, err := k.GetForURL(url)
-	if len(ci.URL) != 0 && len(ci.Username) != 0 && len(ci.Password) != 0 {
-		launchr.Term().Success().Println("Keyring was unlocked successfully: %s credentials were found", keyringEntryName)
-	}
-	if err != nil {
-		if errors.Is(err, keyring.ErrEmptyPass) {
-			return err
-		} else if errors.Is(err, keyring.ErrNotFound) {
-			launchr.Term().Success().Println("Keyring was unlocked successfully: %s credentials were not found", keyringEntryName)
-			return fmt.Errorf(tplAddCredentials, plasmaBinary, url)
-		} else if !errors.Is(err, keyring.ErrNotFound) {
-			launchr.Log().Error("error", "error", err)
-			return errors.New("the keyring is malformed or wrong passphrase provided")
-		}
-	}
-
 	return nil
 }
 
