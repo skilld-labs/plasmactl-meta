@@ -27,6 +27,15 @@ action:
       description: Execute all commands and deploy in CI (default)
       type: boolean
       default: false
+    - name: gitlab-domain
+      title: Gitlab domain
+      description: Gitlab domain to deploy in CI
+      type: string
+      default: ""
+      process:
+        - processor: config.GetValue
+          options:
+            path: platform.deploy.gitlab_domain
     - name: local
       title: Local
       description: Execute compose + sync + package + publish + deploy locally instead of using CI

@@ -22,9 +22,7 @@ func init() {
 }
 
 const (
-	tplAddCredentials  = "execute '%s keyring:login --url=%s' to add credentials to keyring" //nolint:gosec
-	gitlabDomain       = "https://projects.skilld.cloud"
-	internalRepoDomain = "http://repositories.interaction.svc.skilld:8081"
+	tplAddCredentials = "execute '%s keyring:login --url=%s' to add credentials to keyring" //nolint:gosec
 )
 
 // Plugin is launchr plugin providing meta action.
@@ -58,6 +56,7 @@ type metaOptions struct {
 	clean              bool
 	debug              bool
 	conflictsVerbosity bool
+	gitlabDomain       string
 }
 
 // DiscoverActions implements [launchr.ActionDiscoveryPlugin] interface.
@@ -77,6 +76,7 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 			clean:              input.Opt("clean").(bool),
 			debug:              input.Opt("debug").(bool),
 			conflictsVerbosity: input.Opt("conflicts-verbosity").(bool),
+			gitlabDomain:       input.Opt("gitlab-domain").(string),
 		}
 
 		return p.meta(ctx, env, tags, options)
@@ -85,6 +85,7 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 }
 
 func (p *Plugin) meta(ctx context.Context, environment, tags string, options metaOptions) error {
+
 	if options.ci {
 		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
 	}
@@ -164,6 +165,10 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 			return err
 		}
 
+		gitlabDomain := options.gitlabDomain
+		if gitlabDomain == "" {
+			return fmt.Errorf("gitlab-domain is empty: pass it as option or local config")
+		}
 		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
 		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
 		if err != nil {
@@ -273,7 +278,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 		ci.Password = password
 		if ci.Username == "" || ci.Password == "" {
 			if ci.URL != "" {
-				launchr.Term().Info().Printfln("Please add login and password for URL - %s", ci.URL)
+				launchr.Term().Info().Printfln("Please add login and password for %s", ci.URL)
 			}
 			err = keyring.RequestCredentialsFromTty(&ci)
 			if err != nil {
