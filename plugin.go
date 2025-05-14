@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/launchrctl/keyring"
@@ -20,10 +19,6 @@ var actionYaml []byte
 func init() {
 	launchr.RegisterPlugin(&Plugin{})
 }
-
-const (
-	tplAddCredentials = "execute '%s keyring:login --url=%s' to add credentials to keyring" //nolint:gosec
-)
 
 // Plugin is launchr plugin providing meta action.
 type Plugin struct {
@@ -57,6 +52,8 @@ type metaOptions struct {
 	debug              bool
 	conflictsVerbosity bool
 	gitlabDomain       string
+	streams            launchr.Streams
+	persistent         action.InputParams
 }
 
 // DiscoverActions implements [launchr.ActionDiscoveryPlugin] interface.
@@ -77,91 +74,121 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 			debug:              input.Opt("debug").(bool),
 			conflictsVerbosity: input.Opt("conflicts-verbosity").(bool),
 			gitlabDomain:       input.Opt("gitlab-domain").(string),
+			streams:            a.Input().Streams(),
+			persistent:         a.Input().GroupFlags(p.m.GetPersistentFlags().GetName()),
 		}
 
-		return p.meta(ctx, env, tags, options)
+		meta := newMetaAction(a, p.k, p.m)
+		return meta.run(ctx, env, tags, options)
 	}))
 	return []*action.Action{a}, nil
 }
 
-func (p *Plugin) meta(ctx context.Context, environment, tags string, options metaOptions) error {
+type metaAction struct {
+	action.WithLogger
+	action.WithTerm
 
-	if options.ci {
-		launchr.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
+	k  keyring.Keyring
+	m  action.Manager
+	g  *gitMeta
+	ci *continuousIntegration
+}
+
+func newMetaAction(a *action.Action, k keyring.Keyring, m action.Manager) *metaAction {
+	log := launchr.Log()
+	if rt, ok := a.Runtime().(action.RuntimeLoggerAware); ok {
+		log = rt.LogWith()
 	}
 
-	launchr.Log().Info("arguments", "environment", environment, "tags", tags)
+	term := launchr.Term()
+	if rt, ok := a.Runtime().(action.RuntimeTermAware); ok {
+		term = rt.Term()
+	}
+
+	meta := &metaAction{k: k, m: m}
+	meta.SetLogger(log)
+	meta.SetTerm(term)
+
+	meta.g = &gitMeta{WithLogger: meta.WithLogger, WithTerm: meta.WithTerm}
+	meta.ci = &continuousIntegration{WithLogger: meta.WithLogger, WithTerm: meta.WithTerm}
+	return meta
+}
+
+func (ma *metaAction) run(ctx context.Context, environment, tags string, options metaOptions) error {
+	if options.ci {
+		ma.Term().Info().Println("--ci option is deprecated: builds are now done by default in CI")
+	}
+
+	ma.Log().Info("arguments", "environment", environment, "tags", tags)
 
 	ansibleDebug := options.debug
 	if ansibleDebug {
-		launchr.Term().Info().Printfln("Ansible debug mode: %t", ansibleDebug)
+		ma.Term().Info().Printfln("Ansible debug mode: %t", ansibleDebug)
 	}
 
 	var username string
 	var password string
 
 	// Commit unversioned changes if any
-	err := commitChangesIfAny()
+	err := ma.g.commitChangesIfAny()
 	if err != nil {
-		log.Fatalf("error: %v", err)
+		return fmt.Errorf("commit error: %w", err)
 	}
 
 	// Execute bump
 	if !options.skipBump {
-		err = p.executeAction(ctx, "bump", nil, action.InputParams{
+		err = ma.executeAction(ctx, "bump", nil, action.InputParams{
 			"last": options.last,
-		})
+		},
+			options.persistent, options.streams)
 		if err != nil {
 			return fmt.Errorf("bump error: %w", err)
 		}
 	} else {
-		launchr.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
+		ma.Term().Info().Println("--skip-bump option detected: Skipping bump execution")
 	}
-	launchr.Term().Printf("\n")
+	ma.Term().Printf("\n")
 
 	if options.local {
-		launchr.Term().Info().Println("Starting local build")
+		ma.Term().Info().Println("Starting local build")
 
 		// Commands executed sequentially
-		err = p.executeAction(ctx, "compose", nil, action.InputParams{
+		err = ma.executeAction(ctx, "compose", nil, action.InputParams{
 			"skip-not-versioned":  true,
 			"conflicts-verbosity": options.conflictsVerbosity,
 			"clean":               options.clean,
-		})
+		}, options.persistent, options.streams)
 		if err != nil {
 			return fmt.Errorf("compose error: %w", err)
 		}
 
-		launchr.Term().Println()
-		err = p.executeAction(ctx, "bump", nil, action.InputParams{
+		ma.Term().Println()
+		err = ma.executeAction(ctx, "bump", nil, action.InputParams{
 			"sync": true,
-		})
+		}, options.persistent, options.streams)
 		if err != nil {
 			return fmt.Errorf("sync error: %w", err)
 		}
 
-		err = p.executeAction(ctx, "platform:deploy", action.InputParams{
+		err = ma.executeAction(ctx, "platform:deploy", action.InputParams{
 			"environment": environment,
 			"tags":        tags,
-		},
-			action.InputParams{
-				"debug": options.debug,
-			},
-		)
+		}, action.InputParams{
+			"debug": options.debug,
+		}, options.persistent, options.streams)
 		if err != nil {
 			return fmt.Errorf("deploy error: %w", err)
 		}
 
 	} else {
-		launchr.Term().Info().Println("Starting CI build (now default behavior)")
-
+		ma.Term().Info().Println("Starting CI build (now default behavior)")
 		// Push un-pushed commits if any
-		if err := pushBranchIfNotRemote(); err != nil {
+		if err := ma.g.pushBranchIfNotRemote(); err != nil {
 			return err
 		}
 
 		// Push un-pushed commits if any
-		if err := pushCommitsIfAny(); err != nil {
+		if err := ma.g.pushCommitsIfAny(); err != nil {
 			return err
 		}
 
@@ -169,58 +196,58 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 		if gitlabDomain == "" {
 			return fmt.Errorf("gitlab-domain is empty: pass it as option or local config")
 		}
-		launchr.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
-		ci, save, err := getCredentials(gitlabDomain, username, password, p.k)
+		ma.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		ci, save, err := ma.getCredentials(gitlabDomain, username, password)
 		if err != nil {
 			return err
 		}
-		launchr.Term().Printfln("URL: %s", ci.URL)
-		launchr.Term().Printfln("Username: %s", ci.Username)
+		ma.Term().Printfln("URL: %s", ci.URL)
+		ma.Term().Printfln("Username: %s", ci.Username)
 
 		username = ci.Username
 		password = ci.Password
 
 		// Get OAuth token
-		accessToken, err := getOAuthToken(gitlabDomain, username, password)
+		accessToken, err := ma.ci.getOAuthToken(gitlabDomain, username, password)
 		if err != nil {
 			return fmt.Errorf("failed to get OAuth token: %w", err)
 		}
 
 		// Save gitlab credentials to keyring once we are sure that they are correct (after 1st successful api request)
 		if save {
-			err = p.k.Save()
-			launchr.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
+			err = ma.k.Save()
+			ma.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
 			if err != nil {
-				launchr.Log().Error("error during saving keyring file", "error", err)
+				ma.Log().Error("error during saving keyring file", "error", err)
 			}
 		}
 
 		// Get branch name
-		branchName, err := getBranchName()
+		branchName, err := ma.ci.getBranchName()
 		if err != nil {
 			return fmt.Errorf("failed to get branch name: %w", err)
 		}
 
 		// Get repo name
-		repoName, err := getRepoName()
+		repoName, err := ma.ci.getRepoName()
 		if err != nil {
 			return fmt.Errorf("failed to get repo name: %w", err)
 		}
 
 		// Get project ID
-		projectID, err := getProjectID(gitlabDomain, username, password, accessToken, repoName)
+		projectID, err := ma.ci.getProjectID(gitlabDomain, username, password, accessToken, repoName)
 		if err != nil {
 			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
 		}
 
 		// Trigger pipeline
-		pipelineID, err := triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, ansibleDebug)
+		pipelineID, err := ma.ci.triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, ansibleDebug)
 		if err != nil {
 			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}
 
 		// Get all jobs in the pipeline
-		jobs, err := getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+		jobs, err := ma.ci.getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
 		}
@@ -238,7 +265,7 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 		}
 
 		// Trigger the manual job
-		err = triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
+		err = ma.ci.triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
@@ -246,15 +273,29 @@ func (p *Plugin) meta(ctx context.Context, environment, tags string, options met
 	return nil
 }
 
-func (p *Plugin) executeAction(ctx context.Context, id string, args action.InputParams, opts action.InputParams) error {
-	a, ok := p.m.Get(id)
+func (ma *metaAction) executeAction(ctx context.Context, id string, args, opts, persistent action.InputParams, streams launchr.Streams) error {
+	a, ok := ma.m.Get(id)
 	if !ok {
 		return fmt.Errorf("action %q was not found", id)
 	}
-	err := a.SetInput(action.NewInput(a, args, opts, p.app.Streams()))
+
+	persistentKey := ma.m.GetPersistentFlags().GetName()
+	input := action.NewInput(a, args, opts, streams)
+	for k, v := range persistent {
+		input.SetFlagInGroup(persistentKey, k, v)
+	}
+
+	err := ma.m.ValidateInput(a, input)
+	if err != nil {
+		return fmt.Errorf("failed to validate input for action %q: %w", id, err)
+	}
+
+	err = a.SetInput(input)
 	if err != nil {
 		return fmt.Errorf("failed to set input for action %q: %w", id, err)
 	}
+
+	ma.m.Decorate(a)
 	err = a.Execute(ctx)
 	if err != nil {
 		return fmt.Errorf("error executing action %q: %w", id, err)
@@ -262,14 +303,14 @@ func (p *Plugin) executeAction(ctx context.Context, id string, args action.Input
 	return nil
 }
 
-func getCredentials(url, username, password string, k keyring.Keyring) (keyring.CredentialsItem, bool, error) {
-	ci, err := k.GetForURL(url)
+func (ma *metaAction) getCredentials(url, username, password string) (keyring.CredentialsItem, bool, error) {
+	ci, err := ma.k.GetForURL(url)
 	save := false
 	if err != nil {
 		if errors.Is(err, keyring.ErrEmptyPass) {
 			return ci, false, err
 		} else if !errors.Is(err, keyring.ErrNotFound) {
-			launchr.Log().Error("error", "error", err)
+			ma.Log().Error("error", "error", err)
 			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
 		}
 		ci = keyring.CredentialsItem{}
@@ -278,7 +319,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 		ci.Password = password
 		if ci.Username == "" || ci.Password == "" {
 			if ci.URL != "" {
-				launchr.Term().Info().Printfln("Please add login and password for %s", ci.URL)
+				ma.Term().Info().Printfln("Please add login and password for %s", ci.URL)
 			}
 			err = keyring.RequestCredentialsFromTty(&ci)
 			if err != nil {
@@ -286,7 +327,7 @@ func getCredentials(url, username, password string, k keyring.Keyring) (keyring.
 			}
 		}
 
-		err = k.AddItem(ci)
+		err = ma.k.AddItem(ci)
 		if err != nil {
 			return ci, false, err
 		}

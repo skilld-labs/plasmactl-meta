@@ -3,7 +3,6 @@ package plasmactlmeta
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,16 +10,20 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/launchrctl/launchr"
+	"github.com/launchrctl/launchr/pkg/action"
 )
 
-// Checks for uncommitted changes and creates a commit if any are found
-func commitChangesIfAny() error {
+type gitMeta struct {
+	action.WithLogger
+	action.WithTerm
+}
 
+// Checks for uncommitted changes and creates a commit if any are found
+func (g *gitMeta) commitChangesIfAny() error {
 	// Open the existing repository
 	repoPath, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("failed to get current directory: %v", err)
+		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
 	repo, err := git.PlainOpen(repoPath)
@@ -41,11 +44,11 @@ func commitChangesIfAny() error {
 	}
 
 	if status.IsClean() {
-		launchr.Log().Debug("No changes to commit.")
+		g.Log().Debug("No changes to commit.")
 		return nil
 	}
 
-	launchr.Term().Info().Println("Unversioned changes detected. Creating commit...")
+	g.Term().Info().Println("Unversioned changes detected. Creating commit...")
 
 	// Add all changes to the index
 	err = worktree.AddGlob(".")
@@ -73,16 +76,16 @@ func commitChangesIfAny() error {
 	}
 
 	//fmt.Printf("Created %s\n", obj.String())
-	launchr.Term().Printf("Created commit %s\n", obj.Hash.String())
-	launchr.Term().Printf("Author: %s <%s>\n", obj.Author.Name, obj.Author.Email)
-	launchr.Term().Printf("Date:   %s\n", obj.Author.When.Format("Mon Jan 2 15:04:05 2006 -0700"))
-	launchr.Term().Printf("Message: %s\n", obj.Message)
-	launchr.Term().Printf("\n")
+	g.Term().Printf("Created commit %s\n", obj.Hash.String())
+	g.Term().Printf("Author: %s <%s>\n", obj.Author.Name, obj.Author.Email)
+	g.Term().Printf("Date:   %s\n", obj.Author.When.Format("Mon Jan 2 15:04:05 2006 -0700"))
+	g.Term().Printf("Message: %s\n", obj.Message)
+	g.Term().Printf("\n")
 	return nil
 }
 
 // Checks for unpushed commits and pushes them if any are found
-func pushCommitsIfAny() error {
+func (g *gitMeta) pushCommitsIfAny() error {
 
 	// Check for un-pushed commits
 	cmdFetch := exec.Command("git", "fetch", "--quiet")
@@ -99,7 +102,7 @@ func pushCommitsIfAny() error {
 	// Parse status output
 	status := statusOut.String()
 	if strings.Contains(status, "[ahead") {
-		launchr.Term().Info().Println("There are un-pushed commits: Pushing...")
+		g.Term().Info().Println("There are un-pushed commits: Pushing...")
 
 		// Push the commits
 		cmdPush := exec.Command("git", "push")
@@ -108,16 +111,16 @@ func pushCommitsIfAny() error {
 		if err := cmdPush.Run(); err != nil {
 			return fmt.Errorf("failed to push commits: %w", err)
 		}
-		launchr.Term().Info().Println("Successfully pushed commits.")
-		launchr.Term().Printf("\n")
+		g.Term().Info().Println("Successfully pushed commits.")
+		g.Term().Printf("\n")
 	} else {
-		launchr.Log().Debug("No un-pushed commits found.")
+		g.Log().Debug("No un-pushed commits found.")
 	}
 
 	return nil
 }
 
-func pushBranchIfNotRemote() error {
+func (g *gitMeta) pushBranchIfNotRemote() error {
 	// Verify the remote name
 	cmdRemote := exec.Command("git", "remote")
 	var remoteOut bytes.Buffer
@@ -166,7 +169,7 @@ func pushBranchIfNotRemote() error {
 
 	if len(parts) == 1 {
 		// No remote tracking information means the branch is local-only
-		launchr.Term().Info().Printf("Branch '%s' exists locally but not remotely: Pushing...\n", branchName)
+		g.Term().Info().Printf("Branch '%s' exists locally but not remotely: Pushing...\n", branchName)
 
 		// Push the branch to the remote
 		cmdPush := exec.Command("git", "push", "--set-upstream", "origin", branchName)
@@ -175,9 +178,9 @@ func pushBranchIfNotRemote() error {
 		if err := cmdPush.Run(); err != nil {
 			return fmt.Errorf("failed to push branch '%s': %w", branchName, err)
 		}
-		launchr.Term().Info().Println("Successfully pushed branch")
+		g.Term().Info().Println("Successfully pushed branch")
 	} else {
-		launchr.Log().Debug("Branch '%s' already exists remotely", "branch", branchName)
+		g.Log().Debug("Branch '%s' already exists remotely", "branch", branchName)
 	}
 
 	return nil
