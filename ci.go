@@ -19,19 +19,9 @@ import (
 
 const targetJobName = "platform:deploy"
 
-// OAuthResponse is a struct to parse OAuth response.
-type OAuthResponse struct {
-	AccessToken string `json:"access_token"`
-}
-
-// PipelineResponse is a struct to parse OAuth response.
-type PipelineResponse struct {
-	ID             int    `json:"id"`
-	WebURL         string `json:"web_url"`
-	ProjectID      int    `json:"project_id"`
-	DetailedStatus struct {
-		DetailsPath string `json:"details_path"`
-	} `json:"detailed_status"`
+type continuousIntegration struct {
+	action.WithLogger
+	action.WithTerm
 }
 
 // Job struct for listing jobs in the pipeline
@@ -43,30 +33,20 @@ type Job struct {
 	AllowFailure bool   `json:"allow_failure"`
 }
 
-type continuousIntegration struct {
-	action.WithLogger
-	action.WithTerm
-}
+// 1. orySessionToken is used only to request GitLab OAuth token.
+// 2. gitlabAccessToken is used in Authorization headers for all subsequent GitLab API calls.
+func (c *continuousIntegration) getOAuthTokens(gitlabDomain, username, password string) (string, error) {
+	// Get ui.action URL from Ory self‐service login flow JSON
+	oryDomain := "https://auth.skilld.cloud"
+	oryLoginApiPath := "/self-service/login/api"
+	oryLoginApiURL := oryDomain + oryLoginApiPath
+	c.Log().Debug("oryLoginApiURL", "url", oryLoginApiURL)
 
-func (c *continuousIntegration) getOAuthToken(gitlabDomain, username, password string) (string, error) {
-	// Prepare the OAuth request
-	oauthURL := fmt.Sprintf("%s/oauth/token", gitlabDomain)
-	c.Log().Debug("OAuth token request URL", "url", oauthURL)
-
-	data := url.Values{}
-	data.Set("grant_type", "password")
-	data.Set("username", username)
-	data.Set("password", password)
-
-	// Create HTTP request for OAuth token
-	req, err := http.NewRequest("POST", oauthURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequest("GET", oryLoginApiURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(username, password)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// Execute request
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -74,15 +54,109 @@ func (c *continuousIntegration) getOAuthToken(gitlabDomain, username, password s
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	type oryLoginResponse struct {
+		UI struct {
+			Action string `json:"action"`
+		} `json:"ui"`
+	}
+	var apiResp oryLoginResponse
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return "", fmt.Errorf("unable to unmarshal Ory login flow response: %w", err)
+	}
+	apiLoginFlowURL := apiResp.UI.Action
+	c.Log().Debug("Ory login flow action URL", "url", apiLoginFlowURL)
+
+	// POST JSON body to Ory login flow URL
+	type oryLoginPayload struct {
+		Method     string `json:"method"`
+		Identifier string `json:"identifier"`
+		Password   string `json:"password"`
+	}
+
+	loginJSON := oryLoginPayload{
+		Method:     "password",
+		Identifier: username,
+		Password:   password,
+	}
+	jsonBytes, err := json.Marshal(loginJSON)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal Ory login payload: %w", err)
+	}
+
+	req, err = http.NewRequest("POST", apiLoginFlowURL, bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	client = &http.Client{}
+	resp, err = client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	type orySessionResponse struct {
+		SessionToken string `json:"session_token"`
+	}
+	var sr orySessionResponse
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return "", fmt.Errorf("unable to unmarshal Ory session response: %w", err)
+	}
+
+	orySessionToken := sr.SessionToken
+	if orySessionToken == "" {
+		return "", fmt.Errorf("received empty session_token from Ory; response body: %s", string(body))
+	}
+	c.Log().Debug("orySessionToken", "value", orySessionToken)
+
+	// Use orySessionToken as Bearer to get a GitLab OAuth token
+	oauthURL := fmt.Sprintf("%s/oauth/token", gitlabDomain)
+	c.Log().Debug("OAuth token request URL", "url", oauthURL)
+
+	// Send JSON payload
+	gitlabPayload := map[string]string{
+		"grant_type": "password",
+		"username":   username,
+		"password":   password,
+	}
+	gitlabJSON, err := json.Marshal(gitlabPayload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal GitLab OAuth payload: %w", err)
+	}
+
+	req, err = http.NewRequest("POST", oauthURL, bytes.NewBuffer(gitlabJSON))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+orySessionToken)
+
+	client = &http.Client{}
+	resp, err = client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 
 	c.Log().Debug("OAuth token response", "body", string(body))
 
-	// Check the HTTP status code.
 	if resp.StatusCode != http.StatusOK {
 		// If not 200, check if the response appears to be HTML.
 		contentType := resp.Header.Get("Content-Type")
@@ -95,14 +169,16 @@ func (c *continuousIntegration) getOAuthToken(gitlabDomain, username, password s
 				return "", fmt.Errorf("unexpected HTTP status: %s, HTML title: %s", resp.Status, title)
 			}
 		}
-		// Return the error with status code and response body for diagnostics.
 		return "", fmt.Errorf("unexpected HTTP status: %s, body: %s", resp.Status, body)
 	}
 
+	// OAuthResponse is a struct to parse GitLab OAuth response.
+	type OAuthResponse struct {
+		AccessToken string `json:"access_token"`
+	}
 	// Parse JSON response to extract access token.
 	var oauthResp OAuthResponse
-	err = json.Unmarshal(body, &oauthResp)
-	if err != nil {
+	if err := json.Unmarshal(body, &oauthResp); err != nil {
 		return "", err
 	}
 
@@ -129,16 +205,17 @@ func (c *continuousIntegration) getRepoName() (string, error) {
 	return strings.TrimSuffix(repoParts[len(repoParts)-1], ".git"), nil
 }
 
-func (c *continuousIntegration) getProjectID(gitlabDomain, username, password, accessToken, repoName string) (string, error) {
-	apiURL := fmt.Sprintf("%s/api/v4/projects?search=%s&access_token=%s", gitlabDomain, url.QueryEscape(repoName), accessToken)
+// getProjectID calls GitLab API "/projects?search=<repoName>",
+// sets Header "Authorization: Bearer <gitlabAccessToken>", and checks HTTP status first.
+func (c *continuousIntegration) getProjectID(gitlabDomain, gitlabAccessToken, repoName string) (string, error) {
+	apiURL := fmt.Sprintf("%s/api/v4/projects?search=%s", gitlabDomain, url.QueryEscape(repoName))
 	c.Log().Debug("GitLab API URL to get project ID", "url", apiURL)
 
-	// Create the request
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(username, password)
+	req.Header.Set("Authorization", "Bearer "+gitlabAccessToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -152,20 +229,26 @@ func (c *continuousIntegration) getProjectID(gitlabDomain, username, password, a
 		return "", err
 	}
 
-	// Parse the response JSON
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitLab API %s returned status %s: %s",
+			"getProjectID", resp.Status, string(body))
+	}
+
+	// Unmarshal into an array of project maps
 	var projects []map[string]interface{}
-	err = json.Unmarshal(body, &projects)
-	if err != nil {
-		return "", err
+	if err := json.Unmarshal(body, &projects); err != nil {
+		return "", fmt.Errorf("cannot parse projects list: %w; raw response: %s", err, string(body))
 	}
 	if len(projects) == 0 {
-		return "", fmt.Errorf("project not found")
+		return "", fmt.Errorf("project not found (empty list returned)")
 	}
 	return fmt.Sprintf("%.0f", projects[0]["id"].(float64)), nil
 }
 
-func (c *continuousIntegration) triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, buildEnv, buildResources string, ansibleDebug bool) (int, error) {
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipeline?access_token=%s", gitlabDomain, projectID, accessToken)
+// triggerPipeline calls GitLab API "/projects/<projectID>/pipeline",
+// sets Header "Authorization: Bearer <gitlabAccessToken>"
+func (c *continuousIntegration) triggerPipeline(gitlabDomain, gitlabAccessToken, projectID, branchName, buildEnv, buildResources string, ansibleDebug bool) (int, error) {
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipeline", gitlabDomain, projectID)
 	c.Log().Debug("GitLab API URL for triggering pipeline", "url", apiURL)
 
 	// Prepare the variables to pass during pipeline creation
@@ -209,15 +292,13 @@ func (c *continuousIntegration) triggerPipeline(gitlabDomain, username, password
 	}
 	c.Log().Debug("JSON data for triggering pipeline", "json", string(jsonData))
 
-	// Create the request
 	c.Term().Info().Printfln("Creating CI pipeline...")
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return 0, err
 	}
-
-	req.SetBasicAuth(username, password)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+gitlabAccessToken)
 
 	c.Log().Debug("Request for triggering pipeline", "request", req)
 
@@ -235,35 +316,43 @@ func (c *continuousIntegration) triggerPipeline(gitlabDomain, username, password
 	bodyStr := string(body)
 	c.Log().Debug("Response for triggering pipeline", "body", bodyStr)
 
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GitLab API triggerPipeline returned status %s: %s", resp.Status, bodyStr)
+	}
 	// Check if the response contains "Reference not found"
 	if strings.Contains(strings.ToLower(bodyStr), "reference not found") {
 		return 0, fmt.Errorf("git branch not found: %s", bodyStr)
 	}
 
-	// Parse the response JSON to extract pipeline info
+	// PipelineResponse is a struct to parse pipeline response.
+	type PipelineResponse struct {
+		ID             int    `json:"id"`
+		WebURL         string `json:"web_url"`
+		ProjectID      int    `json:"project_id"`
+		DetailedStatus struct {
+			DetailsPath string `json:"details_path"`
+		} `json:"detailed_status"`
+	}
 	var pipelineResp PipelineResponse
-	err = json.Unmarshal(body, &pipelineResp)
-	if err != nil {
+	if err := json.Unmarshal(body, &pipelineResp); err != nil {
 		return 0, err
 	}
 
-	// Print Pipeline URL only once
 	c.Term().Printfln("Pipeline URL: %s", pipelineResp.WebURL)
-
-	// Return the pipeline ID
 	return pipelineResp.ID, nil
 }
 
-func (c *continuousIntegration) getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID string, pipelineID int) ([]Job, error) {
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipelines/%d/jobs?access_token=%s", gitlabDomain, projectID, pipelineID, accessToken)
+// getJobsInPipeline calls GitLab API "/projects/<projectID>/pipelines/<pipelineID>/jobs",
+// sets Header "Authorization: Bearer <gitlabAccessToken>"
+func (c *continuousIntegration) getJobsInPipeline(gitlabDomain, gitlabAccessToken, projectID string, pipelineID int) ([]Job, error) {
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/pipelines/%d/jobs", gitlabDomain, projectID, pipelineID)
 	c.Log().Debug("GitLab API URL for retrieving jobs", "url", apiURL)
 
-	// Create the request
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(username, password)
+	req.Header.Set("Authorization", "Bearer "+gitlabAccessToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -278,19 +367,22 @@ func (c *continuousIntegration) getJobsInPipeline(gitlabDomain, username, passwo
 	}
 	c.Log().Debug("GitLab API response for job", "body", string(body))
 
-	// Parse the jobs in the pipeline
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitLab API getJobsInPipeline returned status %s: %s", resp.Status, string(body))
+	}
+
 	var jobs []Job
-	err = json.Unmarshal(body, &jobs)
-	if err != nil {
+	if err := json.Unmarshal(body, &jobs); err != nil {
 		return nil, err
 	}
 
 	return jobs, nil
 }
 
-// Function to retrieve and continuously print the job trace
-func (c *continuousIntegration) getJobTrace(gitlabDomain, username, password, accessToken, projectID string, jobID int) error {
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/trace?access_token=%s", gitlabDomain, projectID, jobID, accessToken)
+// getJobTrace calls GitLab API "/projects/<projectID>/jobs/<jobID>/trace",
+// sets Header "Authorization: Bearer <gitlabAccessToken>" and tails the log until completion
+func (c *continuousIntegration) getJobTrace(gitlabDomain, gitlabAccessToken, projectID string, jobID int) error {
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/trace", gitlabDomain, projectID, jobID)
 	c.Log().Debug("GitLab API URL for retrieving job trace", "url", apiURL)
 
 	const maxRetries = 20               // Retry up to 20 times to ensure job has started
@@ -298,7 +390,7 @@ func (c *continuousIntegration) getJobTrace(gitlabDomain, username, password, ac
 
 	// Retry until job has started and trace is available
 	for i := 0; i < maxRetries; i++ {
-		traceContent, err := c.fetchTrace(apiURL, username, password)
+		traceContent, err := c.fetchTrace(apiURL, gitlabAccessToken)
 		if err != nil {
 			return err
 		}
@@ -317,7 +409,7 @@ func (c *continuousIntegration) getJobTrace(gitlabDomain, username, password, ac
 	var lastLength int // Keeps track of how much trace has already been printed
 
 	for {
-		traceContent, err := c.fetchTrace(apiURL, username, password)
+		traceContent, err := c.fetchTrace(apiURL, gitlabAccessToken)
 		if err != nil {
 			return err
 		}
@@ -350,7 +442,8 @@ func (c *continuousIntegration) getJobTrace(gitlabDomain, username, password, ac
 	}
 }
 
-// Helper function to determine if job has completed based on trace content and return exit code if failed
+// jobCompleted determines if a GitLab job trace indicates completion.
+// Returns (exitCode, true) if completed; otherwise (1, false).
 func (c *continuousIntegration) jobCompleted(traceContent string) (int, bool) {
 	if strings.Contains(traceContent, "Job succeeded") {
 		return 0, true
@@ -370,17 +463,16 @@ func (c *continuousIntegration) jobCompleted(traceContent string) (int, bool) {
 			}
 		}
 	}
-	return 1, false // Default to failed with exit code 1 if not found
+	return 1, false // Default: treat as failed with code=1 if no explicit indicator
 }
 
-// Helper function to fetch job trace from GitLab API
-func (c *continuousIntegration) fetchTrace(apiURL, username, password string) (string, error) {
-	// Create the request
+// fetchTrace performs the GET request to the given trace URL, passing Header "Authorization: Bearer <gitlabAccessToken>"
+func (c *continuousIntegration) fetchTrace(apiURL, gitlabAccessToken string) (string, error) {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(username, password)
+	req.Header.Set("Authorization", "Bearer "+gitlabAccessToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -389,7 +481,6 @@ func (c *continuousIntegration) fetchTrace(apiURL, username, password string) (s
 	}
 	defer resp.Body.Close()
 
-	// Read the response body (the trace)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
@@ -398,25 +489,26 @@ func (c *continuousIntegration) fetchTrace(apiURL, username, password string) (s
 	return string(body), nil
 }
 
-func (c *continuousIntegration) triggerManualJob(gitlabDomain, username, password, accessToken, projectID string, jobID int, pipelineID int) error {
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/play?access_token=%s", gitlabDomain, projectID, jobID, accessToken)
+// triggerManualJob calls GitLab API "/projects/<projectID>/jobs/<jobID>/play",
+// sets Header "Authorization: Bearer <gitlabAccessToken>"
+func (c *continuousIntegration) triggerManualJob(gitlabDomain, gitlabAccessToken, projectID string, jobID int, pipelineID int) error {
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/play", gitlabDomain, projectID, jobID)
 	c.Log().Debug("GitLab API URL for triggering manual job", "url", apiURL)
 
-	// Retry parameters
 	const maxRetries = 100
 	const retryDelay = 30 * time.Second
 
-	var jobURL string // To store the Job URL
+	var jobURL string
 
 	// Print the Job URL at the very end of the function
 	defer func() {
 		if jobURL != "" {
-			c.Term().Printfln("\nJob URL: %s", jobURL)
+			c.Term().Printfln("Job URL: %s\n", jobURL)
 		}
 	}()
 
 	// Retrieve all jobs to determine the stage of the target job
-	allJobs, err := c.getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+	allJobs, err := c.getJobsInPipeline(gitlabDomain, gitlabAccessToken, projectID, pipelineID)
 	if err != nil {
 		return err
 	}
@@ -435,7 +527,7 @@ func (c *continuousIntegration) triggerManualJob(gitlabDomain, username, passwor
 
 	for i := 0; i < maxRetries; i++ {
 		// Check the status of jobs in previous stages
-		jobs, err := c.getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+		jobs, err := c.getJobsInPipeline(gitlabDomain, gitlabAccessToken, projectID, pipelineID)
 		if err != nil {
 			return err
 		}
@@ -473,8 +565,8 @@ func (c *continuousIntegration) triggerManualJob(gitlabDomain, username, passwor
 		if err != nil {
 			return err
 		}
-		req.SetBasicAuth(username, password)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+gitlabAccessToken)
 
 		client := &http.Client{}
 		resp, err := client.Do(req)
@@ -505,8 +597,7 @@ func (c *continuousIntegration) triggerManualJob(gitlabDomain, username, passwor
 			c.Term().Printfln("Job URL: %s", jobURL)
 
 			// Retrieve and print the job trace
-			err = c.getJobTrace(gitlabDomain, username, password, accessToken, projectID, jobID)
-			if err != nil {
+			if err := c.getJobTrace(gitlabDomain, gitlabAccessToken, projectID, jobID); err != nil {
 				return fmt.Errorf("failed to retrieve job trace: %v", err)
 			}
 			return nil // End the program after successfully retrieving job trace

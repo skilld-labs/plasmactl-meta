@@ -126,8 +126,7 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		ma.Term().Info().Printfln("Ansible debug mode: %t", ansibleDebug)
 	}
 
-	var username string
-	var password string
+	var username, password string
 
 	// Commit unversioned changes if any
 	err := ma.g.commitChangesIfAny()
@@ -182,12 +181,13 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 
 	} else {
 		ma.Term().Info().Println("Starting CI build (now default behavior)")
-		// Push un-pushed commits if any
+
+		// Push branch if it does not exist on remote
 		if err := ma.g.pushBranchIfNotRemote(); err != nil {
 			return err
 		}
 
-		// Push un-pushed commits if any
+		// Push any un-pushed commits
 		if err := ma.g.pushCommitsIfAny(); err != nil {
 			return err
 		}
@@ -196,7 +196,7 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		if gitlabDomain == "" {
 			return fmt.Errorf("gitlab-domain is empty: pass it as option or local config")
 		}
-		ma.Term().Info().Printfln("Getting %s credentials from keyring", gitlabDomain)
+		ma.Term().Info().Printfln("Getting user credentials for %s from keyring", gitlabDomain)
 		ci, save, err := ma.getCredentials(gitlabDomain, username, password)
 		if err != nil {
 			return err
@@ -207,16 +207,16 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		username = ci.Username
 		password = ci.Password
 
-		// Get OAuth token
-		accessToken, err := ma.ci.getOAuthToken(gitlabDomain, username, password)
+		// Get Gitlab OAuth token
+		gitlabAccessToken, err := ma.ci.getOAuthTokens(gitlabDomain, username, password)
 		if err != nil {
 			return fmt.Errorf("failed to get OAuth token: %w", err)
 		}
 
-		// Save gitlab credentials to keyring once we are sure that they are correct (after 1st successful api request)
+		// Save gitlab credentials to keyring once API requests are successful
 		if save {
 			err = ma.k.Save()
-			ma.Log().Debug("saving credentials to keyring", "url", gitlabDomain)
+			ma.Log().Debug("saving user credentials to keyring", "url", gitlabDomain)
 			if err != nil {
 				ma.Log().Error("error during saving keyring file", "error", err)
 			}
@@ -235,19 +235,19 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		}
 
 		// Get project ID
-		projectID, err := ma.ci.getProjectID(gitlabDomain, username, password, accessToken, repoName)
+		projectID, err := ma.ci.getProjectID(gitlabDomain, gitlabAccessToken, repoName)
 		if err != nil {
 			return fmt.Errorf("failed to get ID of project %q: %w", repoName, err)
 		}
 
 		// Trigger pipeline
-		pipelineID, err := ma.ci.triggerPipeline(gitlabDomain, username, password, accessToken, projectID, branchName, environment, tags, ansibleDebug)
+		pipelineID, err := ma.ci.triggerPipeline(gitlabDomain, gitlabAccessToken, projectID, branchName, environment, tags, ansibleDebug)
 		if err != nil {
 			return fmt.Errorf("failed to trigger pipeline: %w", err)
 		}
 
 		// Get all jobs in the pipeline
-		jobs, err := ma.ci.getJobsInPipeline(gitlabDomain, username, password, accessToken, projectID, pipelineID)
+		jobs, err := ma.ci.getJobsInPipeline(gitlabDomain, gitlabAccessToken, projectID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve jobs in pipeline: %w", err)
 		}
@@ -265,7 +265,7 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		}
 
 		// Trigger the manual job
-		err = ma.ci.triggerManualJob(gitlabDomain, username, password, accessToken, projectID, targetJobID, pipelineID)
+		err = ma.ci.triggerManualJob(gitlabDomain, gitlabAccessToken, projectID, targetJobID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
