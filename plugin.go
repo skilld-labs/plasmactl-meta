@@ -4,7 +4,6 @@ package plasmactlmeta
 import (
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -52,6 +51,7 @@ type metaOptions struct {
 	debug              bool
 	conflictsVerbosity bool
 	gitlabDomain       string
+	forgeToken         string
 	streams            launchr.Streams
 	persistent         action.InputParams
 }
@@ -74,6 +74,7 @@ func (p *Plugin) DiscoverActions(_ context.Context) ([]*action.Action, error) {
 			debug:              input.Opt("debug").(bool),
 			conflictsVerbosity: input.Opt("conflicts-verbosity").(bool),
 			gitlabDomain:       input.Opt("gitlab-domain").(string),
+			forgeToken:         input.Opt("forge-token").(string),
 			streams:            a.Input().Streams(),
 			persistent:         a.Input().GroupFlags(p.m.GetPersistentFlags().GetName()),
 		}
@@ -125,8 +126,6 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 	if ansibleDebug {
 		ma.Term().Info().Printfln("Ansible debug mode: %t", ansibleDebug)
 	}
-
-	var username, password string
 
 	// Commit unversioned changes if any
 	err := ma.g.commitChangesIfAny()
@@ -196,30 +195,18 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		if gitlabDomain == "" {
 			return fmt.Errorf("gitlab-domain is empty: pass it as option or local config")
 		}
-		ma.Term().Info().Printfln("Getting user credentials for %s from keyring", gitlabDomain)
-		ci, save, err := ma.getCredentials(gitlabDomain, username, password)
-		if err != nil {
-			return err
-		}
-		ma.Term().Printfln("URL: %s", ci.URL)
-		ma.Term().Printfln("Username: %s", ci.Username)
-
-		username = ci.Username
-		password = ci.Password
-
-		// Get Gitlab OAuth token
-		gitlabAccessToken, err := ma.ci.getOAuthTokens(gitlabDomain, username, password)
-		if err != nil {
-			return fmt.Errorf("failed to get OAuth token: %w", err)
-		}
-
-		// Save gitlab credentials to keyring once API requests are successful
-		if save {
-			err = ma.k.Save()
-			ma.Log().Debug("saving user credentials to keyring", "url", gitlabDomain)
+		// Forge token (GitLab PAT, api scope): prefer --forge-token, else read keyring key
+		// release_forge_token. Resolved here in the CI path only, so local runs never require it.
+		gitlabAccessToken := options.forgeToken
+		if gitlabAccessToken == "" {
+			item, err := ma.k.GetForKey("release_forge_token")
 			if err != nil {
-				ma.Log().Error("error during saving keyring file", "error", err)
+				return fmt.Errorf("forge-token is empty: pass --forge-token or provision keyring key 'release_forge_token' (GitLab PAT, api scope): %w", err)
 			}
+			gitlabAccessToken, _ = item.Value.(string)
+		}
+		if gitlabAccessToken == "" {
+			return fmt.Errorf("forge-token is empty: pass --forge-token or set keyring key 'release_forge_token' (GitLab PAT, api scope)")
 		}
 
 		// Get branch name
@@ -265,7 +252,7 @@ func (ma *metaAction) run(ctx context.Context, environment, tags string, options
 		}
 
 		// Trigger the manual job
-		err = ma.ci.triggerManualJob(gitlabDomain, gitlabAccessToken, projectID, targetJobID, pipelineID)
+		err = ma.ci.triggerManualJob(gitlabDomain, gitlabAccessToken, projectID, environment, tags, targetJobID, pipelineID)
 		if err != nil {
 			return fmt.Errorf("failed to trigger manual job: %w", err)
 		}
@@ -301,41 +288,6 @@ func (ma *metaAction) executeAction(ctx context.Context, id string, args, opts, 
 		return fmt.Errorf("error executing action %q: %w", id, err)
 	}
 	return nil
-}
-
-func (ma *metaAction) getCredentials(url, username, password string) (keyring.CredentialsItem, bool, error) {
-	ci, err := ma.k.GetForURL(url)
-	save := false
-	if err != nil {
-		if errors.Is(err, keyring.ErrEmptyPass) {
-			return ci, false, err
-		} else if !errors.Is(err, keyring.ErrNotFound) {
-			ma.Log().Error("error", "error", err)
-			return ci, false, errors.New("the keyring is malformed or wrong passphrase provided")
-		}
-		ci = keyring.CredentialsItem{}
-		ci.URL = url
-		ci.Username = username
-		ci.Password = password
-		if ci.Username == "" || ci.Password == "" {
-			if ci.URL != "" {
-				ma.Term().Info().Printfln("Please add login and password for %s", ci.URL)
-			}
-			err = keyring.RequestCredentialsFromTty(&ci)
-			if err != nil {
-				return ci, false, err
-			}
-		}
-
-		err = ma.k.AddItem(ci)
-		if err != nil {
-			return ci, false, err
-		}
-
-		save = true
-	}
-
-	return ci, save, nil
 }
 
 func isURLAccessible(url string, code *int) bool {

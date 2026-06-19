@@ -36,6 +36,11 @@ action:
         - processor: config.GetValue
           options:
             path: platform.deploy.gitlab_domain
+    - name: forge-token
+      title: Forge token
+      description: GitLab PAT (api scope) for CI pipeline triggering; falls back to keyring key release_forge_token
+      type: string
+      default: ""
     - name: local
       title: Local
       description: Execute compose + sync + package + publish + deploy locally instead of using CI
